@@ -283,7 +283,7 @@ llama.cpp নিজে MCP client: `--mcp-servers-config <json>` পেলে st
 | `LAMA_LLAMA_HOST` | `127.0.0.1` | ইঞ্জিন bind host |
 | `LAMA_LLAMA_PORT` | `9931` | ইঞ্জিন port |
 | `LAMA_LLAMA_ARGS` | `--jinja --no-webui` | ইঞ্জিনে extra flag (space-separated) |
-| `LAMA_UDS_SOCK` | `/tmp/llama-<uid>/llama.sock` | Unix socket; খালি = বন্ধ |
+| `LAMA_UDS_SOCK` | `/tmp/llama-<uid>/llama.sock` | Unix socket path — সবসময় চালু; খালি রাখলে default path |
 | `LAMA_SSL_KEY` | — | ইঞ্জিন TLS key (PEM) |
 | `LAMA_SSL_CERT` | — | ইঞ্জিন TLS cert (PEM) |
 | `LAMA_MGMT_HOST` | `127.0.0.1` | ম্যানেজার bind host |
@@ -334,7 +334,7 @@ CP_LLAMACPP_MODELS=<model-alias-1>, <model-alias-2>
 | `ECONNREFUSED 127.0.0.1:9931` | ইঞ্জিন বন্ধ | মডেল load করুন |
 | gateway 404 `not in the catalogue` | gateway-র model list পুরনো | gateway restart / sync |
 | `node:sqlite` not found | Node পুরনো | Node 22.5+ (24 recommended) |
-| UDS test fail | socket path/permission | `LAMA_UDS_SOCK` খালি করুন বা dir `0700` নিশ্চিত করুন |
+| UDS test fail | socket path/permission | `LAMA_UDS_SOCK`-এর dir `0700` ও socket `0660` কিনা দেখুন |
 | ম্যানেজার restart-এর পর ইঞ্জিন "orphan" | child process বেঁচে যায় | unload → restart → load (§৫) |
 
 ---
