@@ -21,6 +21,36 @@ export function parsePrometheus(text) {
   return out;
 }
 
+/**
+ * Build identity, parsed from the two sources llama.cpp actually publishes:
+ *   /props.build_info        → "b11941-19ff817fb"   (build number + short commit)
+ *   llama --version          → "version: 0.7.0-dev (build 11941, commit 19ff817fb)"
+ * Neither string is guessed or derived from the other; `match` compares them so
+ * a stale binary next to a running engine is visible instead of silent.
+ */
+export function parseBuildInfo(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const m = /^b?(\d+)-([0-9a-f]{6,40})$/i.exec(s);
+  return { raw: s, build: m ? m[1] : null, commit: m ? m[2] : null };
+}
+
+export function parseBinaryVersion(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const build = /build\s+(\d+)/i.exec(s)?.[1] ?? null;
+  const commit = /commit\s+([0-9a-f]{6,40})/i.exec(s)?.[1] ?? null;
+  const version = /version:\s*([^\s(]+)/i.exec(s)?.[1] ?? (s.split(/\s+/)[0] || null);
+  return { raw: s.split("\n")[0], version, build, commit };
+}
+
+/** Compare /props.build_info with `llama --version`; null when either is missing. */
+export function versionMatch(binary, props) {
+  if (!binary || !props) return null;
+  if (binary.build && props.build) return binary.build === props.build && (!binary.commit || !props.commit || binary.commit.startsWith(props.commit) || props.commit.startsWith(binary.commit));
+  return null;
+}
+
 export function pickProps(j) {
   if (!j || typeof j !== "object") return null;
   const g = j.default_generation_settings || {};
@@ -33,6 +63,7 @@ export function pickProps(j) {
     build_info: j.build_info || null,
     metrics_enabled: Boolean(j.endpoint_metrics),
     slots_enabled: Boolean(j.endpoint_slots),
+    props_writable: Boolean(j.endpoint_props),
     sleeping: Boolean(j.is_sleeping),
     chat_template: typeof j.chat_template === "string"
       ? { present: true, chars: j.chat_template.length, has_tools: /tool/i.test(j.chat_template) }
@@ -59,20 +90,31 @@ export function slotsSummary(payload) {
   };
 }
 
+/**
+ * Counters by their documented names (tools/server/README.md, "GET /metrics").
+ * Exact keys only: the old substring match could return the `*_seconds` gauge
+ * (throughput in tokens/s) as a token count, because both contain "prompt_tokens".
+ * A metric that the docs do not list stays null — never 0, never guessed.
+ */
 export function engineCounters(prom) {
-  const pick = (needle) => {
-    const key = Object.keys(prom).find((k) => k.toLowerCase().includes(needle));
-    return key ? prom[key] : null;
-  };
-  return {
-    prompt_tokens: pick("prompt_tokens"),
-    completion_tokens: pick("tokens_predicted") ?? pick("completion_tokens"),
-    requests_processing: pick("requests_processing"),
-    requests_deferred: pick("requests_deferred"),
-    kv_cache_usage_ratio: pick("kv_cache_usage"),
-    decode_total: pick("n_decode"),
+  const exact = (k) => (Object.prototype.hasOwnProperty.call(prom, k) ? prom[k] : null);
+  const out = {
+    prompt_tokens: exact("llamacpp:prompt_tokens_total"),
+    prompt_tokens_cached: exact("llamacpp:prompt_tokens_cached_total"),
+    completion_tokens: exact("llamacpp:tokens_predicted_total"),
+    requests_processing: exact("llamacpp:requests_processing"),
+    requests_deferred: exact("llamacpp:requests_deferred"),
+    n_tokens_max: exact("llamacpp:n_tokens_max"),
+    decode_total: exact("llamacpp:n_decode_total"),
+    prompt_per_second: exact("llamacpp:prompt_tokens_seconds"),
+    predicted_per_second: exact("llamacpp:predicted_tokens_seconds"),
+    // llama.cpp documents no KV-cache gauge (README "Available metrics").
+    kv_cache_usage_ratio: null,
     raw_keys: Object.keys(prom).slice(0, 40),
   };
+  out.missing = ["prompt_tokens", "completion_tokens", "requests_processing", "requests_deferred", "decode_total"]
+    .filter((k) => out[k] === null);
+  return out;
 }
 
 /**
@@ -139,11 +181,13 @@ export function scanProcessMaps(pid, modelPath, mapsText) {
 }
 
 /** One runtime snapshot for the UI cards. */
-export function buildRuntime({ health, props, slots, prom, logText, alias, model, pid, since, expiresAt, baseUrl, udsPath }) {
+export function buildRuntime({ health, props, slots, prom, logText, alias, model, pid, since, expiresAt, baseUrl, udsPath, binaryVersion }) {
   const p = pickProps(props);
   const s = slotsSummary(slots);
   const counters = engineCounters(parsePrometheus(prom));
   const loaded = health === "ok";
+  const bin = parseBinaryVersion(binaryVersion?.raw ?? binaryVersion ?? "");
+  const fromProps = parseBuildInfo(p?.build_info);
 
   // mmap numbers: /proc/<pid>/maps only. The log hint is kept beside them,
   // clearly labelled, so nobody mistakes it for the count.
@@ -164,9 +208,11 @@ export function buildRuntime({ health, props, slots, prom, logText, alias, model
       : null,
   };
   if (!maps) {
-    memory.note = loaded
-      ? "no /proc/<pid>/maps for this pid (non-Linux?) — mmap count unavailable"
-      : "engine not running — no process maps to read";
+    memory.note = !loaded
+      ? "engine not running — no process maps to read"
+      : !pid
+        ? "engine pid unknown to this manager (started elsewhere) — mmap count unavailable"
+        : "no /proc/<pid>/maps for this pid (non-Linux?) — mmap count unavailable";
   }
   const generating = s.busy > 0;
   return {
@@ -177,6 +223,14 @@ export function buildRuntime({ health, props, slots, prom, logText, alias, model
       pid: pid ?? null, since: since || null, expires_at: expiresAt || null,
       loaded, generating,
       state: !loaded ? "not-loaded" : generating ? "generating" : "idle",
+      version: {
+        binary: bin,                 // llama --version (works while the engine is down)
+        props: fromProps,            // /props.build_info (only while it is up)
+        build: fromProps?.build || bin?.build || null,
+        commit: fromProps?.commit || bin?.commit || null,
+        match: versionMatch(bin, fromProps),
+        source: fromProps ? "/props.build_info + llama --version" : "llama --version only (no /props.build_info)",
+      },
     },
     slots: s,
     counters,

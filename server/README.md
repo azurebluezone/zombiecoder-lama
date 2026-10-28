@@ -133,7 +133,26 @@ Legacy `templates/mcp-gateway.json` still works as a manual override
 `Chat lab` runs one model across `openai` (non-stream/stream), `tools`,
 `anthropic`, `responses` and `embeddings`, recording latency, TTFT, prompt /
 completion / total tokens and the finish reason in `chat_runs`. Usage comes
-from the engine response — never estimated. Reasoning models show their
+from the engine response — never estimated.
+
+`embeddings` needs the engine started with `--embeddings` (llama.cpp: pooling
+must not be `none`). Without it the engine answers `501 not_supported_error`
+and that exact message is stored — the UI does not pretend otherwise.
+
+`/v1/responses` has no top-level `output_text` field (SDK convenience); the
+manager reads `output[].content[].type == "output_text"` and falls back to
+`reasoning_text` / `summary_text`.
+
+## Engine version + mapping ids
+
+`/api/status` and `/api/runtime` expose `version` from both published sources —
+`llama --version` and `/props.build_info` — with `match` comparing them; the
+admin topbar shows the build and turns amber on a mismatch.
+
+`/api/models` adds `mapping` per model: `slug` (`llamacpp/<alias>`), `alias`,
+`env_registered` (CP_LLAMACPP_MODELS), `catalog_id` (live `GET /v1/models` on
+the gateway) and `state` = `live | pending-restart | catalog-only | not-mapped`.
+See `docs/AUDIT.md` for the code-vs-docs audit that produced these fixes. Reasoning models show their
 `reasoning_content` / `thinking` blocks labelled as such when the visible
 content is empty.
 

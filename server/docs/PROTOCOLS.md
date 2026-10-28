@@ -28,8 +28,12 @@ const client = new OpenAI({ baseURL: "http://127.0.0.1:9933/v1", apiKey: "not-ne
 ```
 
 Model ids follow Vercel's `provider/model` slug convention: ours is `llamacpp/<alias>`.
-Mapping a model into the gateway is the **gateway's own admin panel's** job — the
-lama admin deliberately has no map button (owner's decision, 2026-10-28).
+The lama admin shows that id per model (Models → **mapping id**) together with the
+live gateway catalogue (`GET <gateway>/v1/models`), so `live` / `pending-restart` /
+`catalog-only` / `not-mapped` is visible instead of guessed. The `map` button writes
+`CP_LLAMACPP_BASE_URL=<manager>` + the alias into the gateway env (backup first);
+the gateway re-reads it at start, hence `pending-restart` until it is restarted.
+Full audit trail: `server/docs/AUDIT.md`.
 
 ## 2. Anthropic Messages — `POST /v1/messages`
 
@@ -74,7 +78,9 @@ whole engine becomes TLS-only — including the UDS listener (`listening on
 https://…` in the llama log). Plaintext probes then fail by design; the manager's
 engine link is TLS-aware and its `http` test reports this instead of hiding it.
 
-When TLS is **off** (current default), the `https` self-test reports exactly:
+When TLS is **off** (`LAMA_SSL_KEY`/`LAMA_SSL_CERT` empty — the state
+`templates/env.template` ships with; this machine runs with TLS **on**), the `https`
+self-test reports exactly:
 `skipped: LAMA_SSL_KEY/LAMA_SSL_CERT not configured — engine-native TLS is off
 (by design)` — verified live. No fake pass, ever.
 
@@ -91,6 +97,7 @@ second call returned `cached:true, "already in catalog — not re-downloaded"`).
 ```
 model calls tools natively      → engine chat template handles it (finish_reason: tool_calls)
 model cannot call tools         → llama.cpp native MCP: --mcp-servers-config <config.json>
+                                  (experimental flag, per `llama serve --help` line 569)
                                   the MCP server resolves tools against the zombie-gateway
                                   (LAMA_GATEWAY_BASE_URL http://127.0.0.1:5252; HTTP or UDS per config)
 gateway down                    → engine keeps serving; only the fallback tools stop
@@ -115,7 +122,14 @@ lama uses Node built-ins only.
 | GET | `/api/engine-logs` | tail of the live engine log (`llama-<alias>.log`) |
 | POST | `/api/download` | `{repo, file}` — HF download, deduped via `models/catalog.json` |
 | POST | `/api/map` | `{name}` — writes `CP_LLAMACPP_BASE_URL=<manager>` + alias into the gateway env (backup first) |
+| GET | `/api/runtime` | one snapshot: engine (incl. `version`), slots, counters, memory (mmap), MCP config, chat-lab stats |
+| GET | `/api/config` | db path, data dir, bridge path, transports, generated MCP config, default prompt |
 | GET | `/api/preflight` | runtime checks: OS, node, llama.cpp binary+version, models, server, model, OpenAI probe, Anthropic probe |
+
+`/api/status.llama.version` and `/api/runtime.engine.version` carry
+`{binary:{raw,version,build,commit}, props:{raw,build,commit}|null, build, commit,
+match, source}` — `llama --version` and `/props.build_info` quoted verbatim and
+compared (`match:false` = the binary on disk differs from the running engine).
 
 Self-tests assert documented response shapes and report honest timing
 (fixed 2026-10-28: latency is measured after the work completes, not before).
@@ -165,24 +179,35 @@ live with `stub-echo`: `MCP warmup: 'stub-echo' discovered 1 tools` and
 
 | `format` | Endpoint | Notes |
 | --- | --- | --- |
-| `openai` | `POST /v1/chat/completions` | `stream:true` adds `stream_options.include_usage`; TTFT measured on first delta |
+| `openai` | `POST /v1/chat/completions` | `stream:true` adds `stream_options.include_usage` (honoured by build 11941: the final chunk carries `usage`, verified live); TTFT measured on first delta |
 | `tools` | same + `tools[]` | success is `finish_reason:tool_calls`; a model limit is reported as such |
 | `anthropic` | `POST /v1/messages` | `thinking` blocks are shown as `[thinking] …` when no text block exists |
-| `responses` | `POST /v1/responses` | `output_text`, else reasoning/summary text |
-| `embeddings` | `POST /v1/embeddings` | requires engine `--embeddings`; without it the exact engine error is stored |
+| `responses` | `POST /v1/responses` | `output[].content[].type=="output_text"`, else `reasoning_text`/`summary_text`; the response has no top-level `output_text` field (that is an SDK convenience) |
+| `embeddings` | `POST /v1/embeddings` | requires engine `--embeddings` (docs: pooling ≠ none). Without it the exact engine error is stored: `501 not_supported_error "This server does not support embeddings. Start it with \`--embeddings\`"` |
+
+`/tokenize` and `/detokenize` are **POST only** — `GET /tokenize` returns 404
+`File not found` (live), `POST` returns `{"tokens":[…]}`. The manager's `/v1` proxy
+forwards the method unchanged, so a GET is refused by the engine, not by us.
 
 Usage is read from the response (`prompt_tokens`/`completion_tokens` or
 `input_tokens`/`output_tokens`). No token count is ever estimated.
 
 ## 12. Runtime truth (cards + metrics)
 
-- `/props` → `model_alias`, `model_ftype`, `n_ctx`, `total_slots`,
-  `endpoint_metrics`, `chat_template_caps`.
+- `/props` → `model_alias`, `model_ftype`, `total_slots`,
+  `endpoint_metrics`, `endpoint_slots`, `endpoint_props`, `chat_template_caps`,
+  `build_info`. **No top-level `n_ctx`** in build 11941 — context size lives in
+  `default_generation_settings.n_ctx`, which `pickProps` falls back to.
 - `/slots` → per-slot `is_processing` → card state `generating` / `idle` /
   `not-loaded`.
-- `/metrics` → `llamacpp:prompt_tokens_total`, `tokens_predicted_total`,
-  `requests_processing`, `requests_deferred` (engine must run with `--metrics`;
-  the manager reports `metrics_enabled:false` instead of inventing numbers).
+- `/metrics` → exact documented names only: `llamacpp:prompt_tokens_total`,
+  `llamacpp:tokens_predicted_total`, `llamacpp:requests_processing`,
+  `llamacpp:requests_deferred`, `llamacpp:n_decode_total` (engine must run with
+  `--metrics`; disabled → the endpoint answers `501 not_supported_error`, so the
+  manager reports `metrics_enabled:false` and `missing[]` instead of inventing
+  numbers). llama.cpp documents **no** KV-cache gauge, so `kv_cache_usage_ratio`
+  is always `null` — never `0`. A substring match was a real bug here: the
+  `*_seconds` gauges contain "prompt_tokens" too (see `server/docs/AUDIT.md`).
 - `/proc/<pid>/maps` → **the only mmap source**: mapped regions of the GGUF,
   each one's size, and whether the mapping is shared (`r--s`, MAP_SHARED) or
   private. `/props` exposes no mmap state at all; the engine log (when it

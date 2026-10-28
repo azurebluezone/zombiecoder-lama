@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStore } from "../lib/db.mjs";
 import { probeServer, writeEngineConfig, normalizeServer } from "../lib/mcp.mjs";
-import { scanProcessMaps, buildRuntime } from "../lib/runtime.mjs";
+import { scanProcessMaps, buildRuntime, parseBuildInfo, parseBinaryVersion, versionMatch, engineCounters, parsePrometheus } from "../lib/runtime.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "../..");
@@ -178,6 +178,30 @@ for (const [label, input] of [
     JSON.stringify({ source: down.memory.source, regions: down.memory.mapped_regions, hint: down.memory.log_hint?.mapped_buffers, note: down.memory.note }));
 }
 
+/* ------------------------------------------------------- version + counters */
+{
+  const bin = parseBinaryVersion("version: 0.7.0-dev (build 11941, commit 19ff817fb)\nbuilt with Clang 22.1.8 for Linux x86_64");
+  const props = parseBuildInfo("b11941-19ff817fb");
+  check("version: /props.build_info split into build + commit", props.build === "11941" && props.commit === "19ff817fb", props.raw);
+  check("version: llama --version parsed", bin.version === "0.7.0-dev" && bin.build === "11941" && bin.commit === "19ff817fb", bin.raw);
+  check("version: the two sources are compared, not assumed equal", versionMatch(bin, props) === true);
+  check("version: a different running build is reported as mismatch",
+    versionMatch(bin, parseBuildInfo("b11000-abcdef1")) === false);
+
+  const prom = parsePrometheus([
+    "llamacpp:prompt_tokens_total 12",
+    "llamacpp:prompt_tokens_seconds 41.5",
+    "llamacpp:tokens_predicted_total 8",
+    "llamacpp:tokens_predicted_seconds_total 2.8",
+    "llamacpp:requests_processing 0",
+  ].join("\n"));
+  const c = engineCounters(prom);
+  check("metrics: exact documented names — the *_seconds gauge is not a token count",
+    c.prompt_tokens === 12 && c.completion_tokens === 8 && c.prompt_per_second === 41.5,
+    JSON.stringify({ prompt: c.prompt_tokens, completion: c.completion_tokens, gauge: c.prompt_per_second }));
+  check("metrics: undocumented KV gauge stays null, never 0", c.kv_cache_usage_ratio === null);
+}
+
 /* -------------------------------------------------------------- manager */
 const envFile = path.join(TMP, ".env");
 fs.writeFileSync(envFile, "LLAMA_BIN=/home/sahon/.local/bin/llama\nLAMA_DB=" + path.join(TMP, "lama.db") + "\n");
@@ -190,6 +214,7 @@ const manager = spawn(process.execPath, [path.join(ROOT, "server", "server.mjs")
     LAMA_MODELS_DIR: path.join(ROOT, "models"), LAMA_ENV_FILE: envFile,
     LAMA_DATA_DIR: path.join(TMP, "data"),
     LAMA_API_KEY: "", LAMA_MCP_CONFIG: "", LAMA_UDS_SOCK: "", LAMA_GATEWAY_ENV: "",
+    LAMA_GATEWAY_BASE_URL: "", LAMA_SSL_KEY: "", LAMA_SSL_CERT: "",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -244,6 +269,17 @@ const api = async (p, init) => {
     rt.body.memory.source === null && rt.body.memory.mapped_regions === null && typeof rt.body.memory.note === "string",
     rt.body.memory.note);
 
+  const st = await api("/api/status");
+  const ver = st.body.llama?.version || {};
+  check("manager: /api/status exposes the llama.cpp version with its source",
+    typeof ver.source === "string" && ver.binary && "found" in ver.binary && "match" in ver,
+    `${ver.binary?.raw || "(no binary)"} · ${ver.source}`);
+
+  const models = await api("/api/models");
+  check("manager: every model carries its gateway mapping id (llamacpp/<alias>)",
+    Array.isArray(models.body.models) && models.body.models.every((m) => m.mapping?.slug === `llamacpp/${m.name}` && typeof m.mapping.state === "string"),
+    `${models.body.models?.length || 0} model(s), catalogue ${models.body.gateway?.catalogue?.ok ? "ok" : "off"}`);
+
   const chat = await api("/api/chat/test", { method: "POST", body: JSON.stringify({ model: "ghost", format: "openai", prompt: "hi", max_tokens: 8 }) });
   check("manager: chat run failure is stored, not hidden", chat.body.ok === false && chat.body.run.status === "error", chat.body.run.error);
   const runs = await api("/api/chat/runs");
@@ -252,6 +288,8 @@ const api = async (p, init) => {
   const admin = await fetch(BASE + "/admin");
   const html = await admin.text();
   check("manager: admin UI serves the new views", admin.status === 200 && html.includes("Chat lab") && html.includes("MCP servers"));
+  check("manager: admin UI shows the engine version pill and the mapping-id column",
+    html.includes('id="pillVersion"') && html.includes("<th>mapping id</th>") && html.includes('id="gwMeta"'));
 }
 
 manager.kill("SIGTERM");

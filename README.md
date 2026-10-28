@@ -16,7 +16,7 @@ client → zombie-gateway :5252 → lama manager :9933 → llama.cpp engine :993
   আর **control plane** (prompts + MCP servers, SQLite-এ)।
 
 > এই README-র প্রতিটি কমান্ড এই রেপোতে ২০২৬-১০-২৮ তারিখে চালানো ও যাচাই করা:
-> `50/50 checks passed`, engine TLS `PASS 2ms`, gateway chat `HTTP 200`।
+> `59/59 checks passed`, engine TLS `PASS 2ms`, gateway chat `HTTP 200`।
 > যেখানে যাচাই করা যায়নি (যেমন Windows), সেখানে **NOT_TESTED** লেখা আছে।
 
 ---
@@ -26,7 +26,7 @@ client → zombie-gateway :5252 → lama manager :9933 → llama.cpp engine :993
 | জিনিস | ভার্সন | যাচাই করার কমান্ড |
 | --- | --- | --- |
 | Linux (Ubuntu/Debian) | — | `uname -a` |
-| Node.js | **22.5+** (tested: 24.21.0) — `node:sqlite` দরকার | `node -v` |
+| Node.js | **22.5+** (tested: 24.21.0 via nvm, 24.22.1 via `/usr/bin/node`) — `node:sqlite` দরকার | `node -v` |
 | llama.cpp binary | `serve` subcommand সহ (tested: `0.7.0-dev build 11941`) | `llama version` |
 | openssl | যেকোনো (TLS সার্টিফিকেট বানাতে) | `openssl version` |
 | Git | যেকোনো | `git --version` |
@@ -202,15 +202,20 @@ node --check scripts/setup.mjs && node --check scripts/gen-cert.mjs && node --ch
 
 # ২) পুরো integration suite (temp DB + temp port ব্যবহার করে, লাইভ ডেটা ছোঁয় না)
 node server/test/integration.mjs
-# শেষ লাইন: 50/50 checks passed
+# শেষ লাইন: 59/59 checks passed
 
 # ৩) ম্যানেজার বেঁচে আছে?
 curl -s http://127.0.0.1:9933/healthz
 # {"ok":true}
 
-# ৪) ইঞ্জিনের সত্যিকারের অবস্থা
+# ৪) ইঞ্জিনের সত্যিকারের অবস্থা (ভার্সনসহ)
 curl -s http://127.0.0.1:9933/api/status | python3 -m json.tool
 # "health": "ok", "tls": true/false, "alias": "<loaded model>"
+# "version": {"binary": {"raw": "version: 0.7.0-dev (build 11941, commit 19ff817fb)", ...},
+#             "props": {"raw": "b11941-19ff817fb", ...}, "build": "11941", "match": true}
+
+# ৪ক) ম্যাপিং আইডি — কোন alias গেটওয়েতে কী নামে আছে
+curl -s http://127.0.0.1:9933/api/models | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(m["name"], "->", m["mapping"]["slug"], m["mapping"]["state"]) for m in d["models"]]'
 
 # ৫) প্রোটোকল টেস্ট (একটা একটা করে)
 curl -s -X POST http://127.0.0.1:9933/api/test -H 'content-type: application/json' -d '{"kind":"https"}'
@@ -244,11 +249,16 @@ TLS চালু থাকলে `"kind":"http"` ইচ্ছাকৃতভা�
 
 ## ৭. অ্যাডমিন প্যানেল — কী কী কাজ
 
-- **Overview** — engine pill, TTL, preflight, request metrics, self-test matrix।
+- **Overview** — engine pill, **llama.cpp version pill** (topbar: `llama.cpp 0.7.0-dev · b11941`;
+  tooltip-এ `llama --version` আর `/props.build_info` দুটোই, mismatch হলে amber), TTL, preflight,
+  request metrics, self-test matrix।
 - **Chat lab** — একই ইঞ্জিনে `openai` / `tools` / `anthropic` / `responses` / `embeddings` ফরম্যাটে
   চ্যাট পাঠিয়ে response, latency, TTFT, tokens দেখায়; প্রতিটি রান `chat_runs` টেবিলে জমা থাকে।
+  `embeddings`-এর জন্য ইঞ্জিন `--embeddings` ছাড়া চলে না — না থাকলে engine-এর 501 error হুবহু দেখায়।
 - **Metrics** — ম্যানেজার লগ থেকে request count, error, avg/max latency, bytes; মডেল-ভিত্তিক ভাঙা হিসাব।
-- **Models** — scan, sync, download (catalog dedupe), load/unload, `map` badge।
+- **Models** — scan, sync, download (catalog dedupe), load/unload, `map` badge, আর **mapping id**
+  কলাম: `llamacpp/<alias>` + gateway-র live catalogue id; state = `live` / `pending-restart` /
+  `catalog-only` / `not-mapped` (নিচে `gwMeta` লাইনে env aliases আর catalogue URL)।
 - **Self-tests** — `http`, `https`, `uds`, `openai` (non-stream), `stream`, `anthropic`, `tools`।
   প্রতিটি বাটন আসল route-এ হিট করে shape যাচাই করে।
 - **Logs** — ম্যানেজার JSONL, শুধু request ফিল্টার।
@@ -260,7 +270,7 @@ TLS চালু থাকলে `"kind":"http"` ইচ্ছাকৃতভা�
 
 ## ৮. MCP কীভাবে কাজ করে
 
-llama.cpp নিজে MCP client: `--mcp-servers-config <json>` পেলে stdio server-গুলোর tools ব্যবহার করতে পারে।
+llama.cpp নিজে MCP client: `--mcp-servers-config <json>` (experimental flag) পেলে stdio server-গুলোর tools ব্যবহার করতে পারে।
 
 - অ্যাডমিনে MCP server যোগ করলে সেটা SQLite-এ যায়, probe হয়, তারপর `data/mcp-servers.generated.json`
   তৈরি হয় (`apply to engine`)।
@@ -333,6 +343,8 @@ CP_LLAMACPP_MODELS=<model-alias-1>, <model-alias-2>
 | `model not found: X` | scan-এ নেই | Models → sync, বা `LAMA_MODELS_DIR` ঠিক করুন |
 | `ECONNREFUSED 127.0.0.1:9931` | ইঞ্জিন বন্ধ | মডেল load করুন |
 | gateway 404 `not in the catalogue` | gateway-র model list পুরনো | gateway restart / sync |
+| Models-এ `pending-restart` | `CP_LLAMACPP_MODELS`-এ আছে, live catalogue-এ নেই | `systemctl --user restart zombie-gateway.service` |
+| topbar version pill amber | `llama --version` ≠ `/props.build_info` | ইঞ্জিন unload → manager restart → load (পুরনো binary চলছে) |
 | `node:sqlite` not found | Node পুরনো | Node 22.5+ (24 recommended) |
 | UDS test fail | socket path/permission | `LAMA_UDS_SOCK`-এর dir `0700` ও socket `0660` কিনা দেখুন |
 | ম্যানেজার restart-এর পর ইঞ্জিন "orphan" | child process বেঁচে যায় | unload → restart → load (§৫) |
@@ -360,7 +372,8 @@ CP_LLAMACPP_MODELS=<model-alias-1>, <model-alias-2>
 │   ├── lib/bridge.mjs          # remote transport → stdio bridge
 │   ├── lib/runtime.mjs         # /proc/<pid>/maps থেকে mmap সত্য
 │   ├── docs/PROTOCOLS.md       # API/protocol রেফারেন্স
-│   └── test/                   # integration.mjs (50 checks) + stub-servers.mjs
+│   ├── docs/AUDIT.md           # কোড বনাম llama.cpp ডকুমেন্ট অডিট (ফিক্স + প্রমাণ)
+│   └── test/                   # integration.mjs (59 checks) + stub-servers.mjs
 └── templates/                  # env.template, systemd unit, Windows bat
 ```
 

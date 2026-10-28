@@ -29,43 +29,48 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { createStore } from "./lib/db.mjs";
 import { normalizeServer, probeServer, writeEngineConfig, TRANSPORTS } from "./lib/mcp.mjs";
-import { buildRuntime } from "./lib/runtime.mjs";
+import { buildRuntime, parseBinaryVersion, parseBuildInfo, versionMatch } from "./lib/runtime.mjs";
 
 const LAMA = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HOME = os.homedir();
 const T0 = Date.now();
 
 // ---- config -----------------------------------------------------------------
+// process.env wins over .env — including an explicitly empty value, so a test or
+// a unit file can switch a feature off without editing the developer's .env.
+// LAMA_ENV_FILE selects which file is read; before this, tests read the real .env.
 const fileEnv = {};
-const envFile = path.join(LAMA, ".env");
-if (fs.existsSync(envFile)) {
-  for (const line of fs.readFileSync(envFile, "utf8").split(/\r?\n/)) {
+const ENV_FILE = process.env.LAMA_ENV_FILE || path.join(LAMA, ".env");
+if (fs.existsSync(ENV_FILE)) {
+  for (const line of fs.readFileSync(ENV_FILE, "utf8").split(/\r?\n/)) {
     const m = line.match(/^([A-Z_]+)=(.*)$/);
     if (m) fileEnv[m[1]] = m[2];
   }
 }
+const env = (k) => (Object.prototype.hasOwnProperty.call(process.env, k) ? process.env[k] : (fileEnv[k] ?? ""));
 const UDS_DEFAULT = path.join(os.tmpdir(), `llama-${process.getuid?.() ?? 0}`, "llama.sock");
 const cfg = {
-  LLAMA_BIN: process.env.LLAMA_BIN || fileEnv.LLAMA_BIN || "llama",
-  LLAMA_MODEL_CTX: Number(process.env.LLAMA_MODEL_CTX || fileEnv.LLAMA_MODEL_CTX || 4096),
-  LLAMA_THREADS: Number(process.env.LLAMA_THREADS || fileEnv.LLAMA_THREADS || 4),
-  LAMA_LLAMA_HOST: process.env.LAMA_LLAMA_HOST || fileEnv.LAMA_LLAMA_HOST || "127.0.0.1",
-  LAMA_LLAMA_PORT: Number(process.env.LAMA_LLAMA_PORT || fileEnv.LAMA_LLAMA_PORT || 9931),
-  LAMA_LLAMA_ARGS: (process.env.LAMA_LLAMA_ARGS || fileEnv.LAMA_LLAMA_ARGS || "--jinja --no-webui").split(/\s+/).filter(Boolean),
-  LAMA_UDS_SOCK: process.env.LAMA_UDS_SOCK || fileEnv.LAMA_UDS_SOCK || UDS_DEFAULT,
-  LAMA_SSL_KEY: process.env.LAMA_SSL_KEY || fileEnv.LAMA_SSL_KEY || "",
-  LAMA_SSL_CERT: process.env.LAMA_SSL_CERT || fileEnv.LAMA_SSL_CERT || "",
-  LAMA_MGMT_HOST: process.env.LAMA_MGMT_HOST || fileEnv.LAMA_MGMT_HOST || "127.0.0.1",
-  LAMA_MGMT_PORT: Number(process.env.LAMA_MGMT_PORT || fileEnv.LAMA_MGMT_PORT || 9933),
-  LAMA_MODELS_DIR: process.env.LAMA_MODELS_DIR || fileEnv.LAMA_MODELS_DIR || path.join(LAMA, "models"),
-  LAMA_LOG_DIR: process.env.LAMA_LOG_DIR || fileEnv.LAMA_LOG_DIR || path.join(LAMA, "logs"),
-  LAMA_API_KEY: process.env.LAMA_API_KEY || fileEnv.LAMA_API_KEY || "",
-  HF_TOKEN: process.env.HF_TOKEN || fileEnv.HF_TOKEN || "",
-  LAMA_MCP_CONFIG: process.env.LAMA_MCP_CONFIG || fileEnv.LAMA_MCP_CONFIG || "",
-  LAMA_GATEWAY_ENV: process.env.LAMA_GATEWAY_ENV || fileEnv.LAMA_GATEWAY_ENV || "",
-  LAMA_DB: process.env.LAMA_DB || fileEnv.LAMA_DB || path.join(LAMA, "data", "lama.db"),
-  LAMA_ENV_FILE: process.env.LAMA_ENV_FILE || path.join(LAMA, ".env"),
-  LAMA_DATA_DIR: process.env.LAMA_DATA_DIR || fileEnv.LAMA_DATA_DIR || path.join(LAMA, "data"),
+  LLAMA_BIN: env("LLAMA_BIN") || "llama",
+  LLAMA_MODEL_CTX: Number(env("LLAMA_MODEL_CTX") || 4096),
+  LLAMA_THREADS: Number(env("LLAMA_THREADS") || 4),
+  LAMA_LLAMA_HOST: env("LAMA_LLAMA_HOST") || "127.0.0.1",
+  LAMA_LLAMA_PORT: Number(env("LAMA_LLAMA_PORT") || 9931),
+  LAMA_LLAMA_ARGS: (env("LAMA_LLAMA_ARGS") || "--jinja --no-webui").split(/\s+/).filter(Boolean),
+  LAMA_UDS_SOCK: env("LAMA_UDS_SOCK") || UDS_DEFAULT,
+  LAMA_SSL_KEY: env("LAMA_SSL_KEY") || "",
+  LAMA_SSL_CERT: env("LAMA_SSL_CERT") || "",
+  LAMA_MGMT_HOST: env("LAMA_MGMT_HOST") || "127.0.0.1",
+  LAMA_MGMT_PORT: Number(env("LAMA_MGMT_PORT") || 9933),
+  LAMA_MODELS_DIR: env("LAMA_MODELS_DIR") || path.join(LAMA, "models"),
+  LAMA_LOG_DIR: env("LAMA_LOG_DIR") || path.join(LAMA, "logs"),
+  LAMA_API_KEY: env("LAMA_API_KEY") || "",
+  HF_TOKEN: env("HF_TOKEN") || "",
+  LAMA_MCP_CONFIG: env("LAMA_MCP_CONFIG") || "",
+  LAMA_GATEWAY_ENV: env("LAMA_GATEWAY_ENV") || "",
+  LAMA_GATEWAY_BASE_URL: env("LAMA_GATEWAY_BASE_URL") || "",
+  LAMA_DB: env("LAMA_DB") || path.join(LAMA, "data", "lama.db"),
+  LAMA_ENV_FILE: ENV_FILE,
+  LAMA_DATA_DIR: env("LAMA_DATA_DIR") || path.join(LAMA, "data"),
 };
 const LLAMA_TLS = Boolean(cfg.LAMA_SSL_KEY && cfg.LAMA_SSL_CERT); // engine-native TLS
 const LLAMA_BASE = `http://${cfg.LAMA_LLAMA_HOST}:${cfg.LAMA_LLAMA_PORT}`;          // plaintext origin (http test)
@@ -149,7 +154,7 @@ function scanModels() {
 }
 
 // ---- llama server lifecycle -----------------------------------------------------
-const cur = { child: null, pid: null, alias: null, model: null, since: null, expiresAt: null };
+const cur = { child: null, pid: null, alias: null, model: null, since: null, expiresAt: null, buildInfo: null };
 const ttlTimer = { id: null };
 
 function engineGet(reqPath, { timeoutMs = 4000, uds = false, plain = false } = {}) {
@@ -181,6 +186,37 @@ async function upstreamHealth(timeoutMs = 2000) {
     const r = await engineGet("/health", { timeoutMs });
     return r.status === 200 ? "ok" : `http_${r.status}`;
   } catch { return "down"; }
+}
+
+// ---- engine identity -------------------------------------------------------------
+// Two published sources, both quoted verbatim:
+//   `llama --version`     → works even when no model is loaded
+//   /props.build_info     → what the *running* engine says about itself
+// If they disagree the UI shows a warning; nothing is inferred from the other.
+let binVersionCache = null;
+function binaryVersion() {
+  if (binVersionCache) return binVersionCache;
+  if (!fs.existsSync(cfg.LLAMA_BIN)) {
+    binVersionCache = { binary: cfg.LLAMA_BIN, found: false, raw: "", version: null, build: null, commit: null };
+    return binVersionCache;
+  }
+  const r = spawnSync(cfg.LLAMA_BIN, ["--version"], { timeout: 4000, encoding: "utf8" });
+  const raw = ((r.stdout || "") + (r.stderr || "")).trim().split("\n")[0] || "";
+  binVersionCache = { binary: cfg.LLAMA_BIN, found: true, ...(parseBinaryVersion(raw) || { raw, version: null, build: null, commit: null }) };
+  return binVersionCache;
+}
+
+function engineVersion() {
+  const binary = binaryVersion();
+  const props = parseBuildInfo(cur.buildInfo || "");
+  return {
+    binary,
+    props,
+    build: props?.build || binary.build || null,
+    commit: props?.commit || binary.commit || null,
+    match: versionMatch(binary, props),
+    source: props ? "/props.build_info + llama --version" : "llama --version only (no /props.build_info sampled yet)",
+  };
 }
 
 function engineMcpConfig() {
@@ -370,6 +406,45 @@ function gatewayModelState() {
   }
 }
 
+/**
+ * Live catalogue of the gateway (GET /v1/models). The gateway's id is what a
+ * client must ask for, e.g. `llamacpp/<upstream_id>` — it is not always the same
+ * string as CP_LLAMACPP_MODELS, and a stale catalogue (no restart/sync after a
+ * model change) shows up here instead of being guessed. Short timeout: the
+ * admin refreshes every few seconds and a down gateway must not stall the page.
+ */
+async function gatewayCatalogue(timeoutMs = 900) {
+  const base = String(cfg.LAMA_GATEWAY_BASE_URL || "").replace(/\/+$/, "");
+  if (!base) return { configured: false, ok: false, url: null, models: [], error: "LAMA_GATEWAY_BASE_URL not configured in lama/.env" };
+  const url = `${base}/v1/models`;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const text = await r.text();
+    if (!r.ok) return { configured: true, ok: false, url, models: [], error: `HTTP ${r.status}: ${text.slice(0, 120)}` };
+    const j = JSON.parse(text);
+    const models = (j.data || []).map((m) => ({
+      id: m.id || null,
+      owned_by: m.owned_by || null,
+      upstream_id: m.metadata?.upstream_id || null,
+    })).filter((m) => m.id);
+    return { configured: true, ok: true, url, models };
+  } catch (e) {
+    return { configured: true, ok: false, url, models: [], error: e.message };
+  }
+}
+
+/** One mapping row: what the env says, what the live catalogue says, and the difference. */
+function mappingFor(name, envAliases, catalogue) {
+  const slug = `llamacpp/${name}`;
+  const live = catalogue.models.find((m) => m.id === slug || m.upstream_id === name) || null;
+  const registered = envAliases.includes(name);
+  let state = "not-mapped", note = "not registered in CP_LLAMACPP_MODELS and absent from the gateway catalogue";
+  if (registered && live) { state = "live"; note = "registered in the env and served by the live catalogue"; }
+  else if (registered) { state = "pending-restart"; note = "CP_LLAMACPP_MODELS has this alias, the live catalogue does not — restart or sync zombie-gateway"; }
+  else if (live) { state = "catalog-only"; note = "the gateway serves it, but the alias is not in CP_LLAMACPP_MODELS"; }
+  return { slug, alias: name, env_registered: registered, catalog_id: live?.id || null, catalog_upstream: live?.upstream_id || null, state, note };
+}
+
 async function mapToGateway({ name }) {
   if (!cfg.LAMA_GATEWAY_ENV) return { error: "LAMA_GATEWAY_ENV not configured in lama/.env" };
   if (!fs.existsSync(cfg.LAMA_GATEWAY_ENV)) return { error: `gateway env not found: ${cfg.LAMA_GATEWAY_ENV}` };
@@ -417,13 +492,8 @@ async function preflight() {
   add("node", true, process.version);
 
   let t = Date.now();
-  const binExists = fs.existsSync(cfg.LLAMA_BIN);
-  let ver = "";
-  if (binExists) {
-    const r = spawnSync(cfg.LLAMA_BIN, ["--version"], { timeout: 4000, encoding: "utf8" });
-    ver = ((r.stdout || "") + (r.stderr || "")).trim().split("\n")[0] || "";
-  }
-  add("llama.cpp installed", binExists, binExists ? `${cfg.LLAMA_BIN}${ver ? " · " + ver : ""}` : `missing: ${cfg.LLAMA_BIN}`, Date.now() - t);
+  const bin = binaryVersion();
+  add("llama.cpp installed", bin.found, bin.found ? `${bin.binary}${bin.raw ? " · " + bin.raw : ""}` : `missing: ${bin.binary}`, Date.now() - t);
 
   t = Date.now();
   const { models } = scanModels();
@@ -611,10 +681,12 @@ async function runtimeSnapshot() {
     prom = c?.body || "";
   }
   const tail = engineLogTail(4000);
+  cur.buildInfo = props?.build_info || null; // /props.build_info — the running engine's own build id
   const runtime = buildRuntime({
     health, props, slots, prom, logText: tail.lines.join("\n"),
     alias: cur.alias, model: cur.model, pid: cur.pid, since: cur.since,
     expiresAt: cur.expiresAt, baseUrl: LLAMA_ORIGIN, udsPath: cfg.LAMA_UDS_SOCK || null,
+    binaryVersion: binaryVersion(),
   });
   runtime.log_file = tail.file;
   runtime.mcp_config = engineMcpConfig() || null;
@@ -894,6 +966,7 @@ const server = http.createServer(async (req, res) => {
         health, base_url: LLAMA_ORIGIN, tls: LLAMA_TLS, uds: cfg.LAMA_UDS_SOCK || null,
         alias: cur.alias, model: cur.model, since: cur.since, expires_at: cur.expiresAt,
         pid: cur.pid, active: !!cur.child, mcp_config: engineMcpConfig() || null,
+        version: engineVersion(),
       },
       mcp: { total: store.mcp.list().length, enabled: store.mcp.enabled().length },
       prompts: { total: store.prompts.list().length, resolved: store.prompts.resolve({}) },
@@ -902,9 +975,11 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/models") {
     const s = scanModels();
     const gw = gatewayModelState();
+    const cat = await gatewayCatalogue();
     return send(200, {
-      ...s, gateway: gw,
-      models: s.models.map((m) => ({ ...m, gateway_mapped: gw.aliases.includes(m.name) })),
+      ...s,
+      gateway: { ...gw, base_url: cfg.LAMA_GATEWAY_BASE_URL || null, catalogue: { configured: cat.configured, ok: cat.ok, url: cat.url, error: cat.error || null, count: cat.models.length, ids: cat.models.map((m) => m.id) } },
+      models: s.models.map((m) => ({ ...m, gateway_mapped: gw.aliases.includes(m.name), mapping: mappingFor(m.name, gw.aliases, cat) })),
     });
   }
   if (p === "/api/metrics") return send(200, metrics());

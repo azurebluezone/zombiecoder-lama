@@ -234,6 +234,7 @@
         <div class="logo">L</div>
         <div class="brand">lama <span>· llama.cpp manager</span></div>
         <div class="top-actions">
+            <span class="pill" id="pillVersion" title="llama.cpp build (llama --version + /props.build_info)">llama.cpp …</span>
             <span class="pill" id="pillEngine">engine: …</span>
             <span class="pill" id="pillTls">TLS off</span>
             <span class="pill" id="pillUds">UDS off</span>
@@ -344,16 +345,17 @@
 
                 <div class="panel">
                     <div class="row" style="justify-content:space-between;margin-bottom:10px">
-                        <div class="panel-title" style="margin:0">Model list <span class="hint">— green = loaded, red = unloaded, <b style="color:var(--green)">map</b> = registered in the gateway</span></div>
+                        <div class="panel-title" style="margin:0">Model list <span class="hint">— green = loaded, red = unloaded, <b style="color:var(--green)">map</b> = in <code>CP_LLAMACPP_MODELS</code>, mapping id = what the gateway catalogue calls it (<code>llamacpp/&lt;alias&gt;</code>)</span></div>
                         <div class="row" style="gap:6px">
                             <button class="ghost" onclick="loadModels(this)">reload</button>
                             <button class="act" onclick="syncModels(this)">sync</button>
                         </div>
                     </div>
+                    <div class="hint mono" id="gwMeta" style="margin-bottom:8px"></div>
                     <div class="tablewrap">
                         <table>
-                            <thead><tr><th>model</th><th>state</th><th>size</th><th>source</th><th>repo</th><th>path</th><th>actions</th></tr></thead>
-                            <tbody id="modelRows"><tr><td colspan="7" style="color:var(--muted)">loading…</td></tr></tbody>
+                            <thead><tr><th>model</th><th>state</th><th>mapping id</th><th>size</th><th>source</th><th>repo</th><th>path</th><th>actions</th></tr></thead>
+                            <tbody id="modelRows"><tr><td colspan="8" style="color:var(--muted)">loading…</td></tr></tbody>
                         </table>
                     </div>
                 </div>
@@ -431,7 +433,7 @@
                             <option value="tools">openai · tool call</option>
                             <option value="anthropic">anthropic · /v1/messages</option>
                             <option value="responses">openai · /v1/responses</option>
-                            <option value="embeddings">embeddings · /v1/embeddings</option>
+                            <option value="embeddings">embeddings · /v1/embeddings (engine needs --embeddings)</option>
                         </select></div>
                         <div><label class="f">max tokens</label><input id="chatMax" type="number" value="128" min="1" max="4096"></div>
                         <div><label class="f">temperature</label><input id="chatTemp" type="number" step="0.1" value="0.7"></div>
@@ -702,6 +704,19 @@ gateway down?                 →  engine keeps serving; only that MCP server st
                 const mapped = m.gateway_mapped
                     ? ' <span class="badge ok" title="registered in the gateway (CP_LLAMACPP_MODELS)">map</span>'
                     : "";
+                const mp = m.mapping || {};
+                const slug = mp.slug || ("llamacpp/" + m.name);
+                const mpBadge = mp.state === "live"
+                    ? '<span class="badge ok" title="' + esc(mp.note) + '">live</span>'
+                    : mp.state === "pending-restart"
+                        ? '<span class="badge busy" title="' + esc(mp.note) + '">pending restart</span>'
+                        : mp.state === "catalog-only"
+                            ? '<span class="badge" title="' + esc(mp.note) + '">catalog only</span>'
+                            : '<span class="badge bad" title="' + esc(mp.note) + '">not mapped</span>';
+                const catalogLine = mp.catalog_id && mp.catalog_id !== slug
+                    ? `<div class="hint mono" style="margin-top:3px">catalogue: ${esc(mp.catalog_id)}</div>` : "";
+                const mappingCell = `<td><code style="word-break:break-all">${esc(slug)}</code>${catalogLine}` +
+                    `<div class="row" style="gap:6px;margin-top:4px">${mpBadge}${mp.env_registered ? '<span class="hint">env</span>' : ""}</div></td>`;
                 const actions = [
                     isLoaded
                         ? `<button class="ghost" onclick="unload(this)">unload</button>`
@@ -710,12 +725,16 @@ gateway down?                 →  engine keeps serving; only that MCP server st
                         ? `<button class="ghost" onclick="mapModel('${esc(m.name)}', this)">map</button>` : "",
                 ].filter(Boolean).join("");
                 return `<tr><td><b style="color:var(--white)">${esc(m.name)}</b></td>` +
-                    `<td>${state}${mapped}</td><td>${mb(m.size)}</td>` +
+                    `<td>${state}${mapped}</td>${mappingCell}<td>${mb(m.size)}</td>` +
                     `<td><span class="pill">${esc(m.source)}</span></td>` +
                     `<td>${m.repo ? "<code>" + esc(m.repo) + "</code>" : '<span style="color:var(--muted)">—</span>'}</td>` +
                     `<td><button class="eye" data-path="${esc(m.path)}" onclick="togglePath(this)" title="show path" aria-label="show path">👁</button></td>` +
                     `<td><div class="row" style="gap:6px;align-items:center">${actions}</div></td></tr>`;
-            }).join("") || `<tr><td colspan="7" style="color:var(--muted)">no .gguf found — press sync</td></tr>`;
+            }).join("") || `<tr><td colspan="8" style="color:var(--muted)">no .gguf found — press sync</td></tr>`;
+            const cat = gatewayState.catalogue || {};
+            $("gwMeta").textContent = gatewayState.configured
+                ? `gateway env ${gatewayState.env || "—"} · env aliases: ${(gatewayState.aliases || []).join(", ") || "(none)"} · live catalogue ${cat.ok ? cat.count + " model(s)" : "unavailable (" + (cat.error || "not fetched") + ")"}${cat.url ? " · " + cat.url : ""}`
+                : "gateway not configured (LAMA_GATEWAY_ENV / LAMA_GATEWAY_BASE_URL) — mapping ids are shown, live catalogue is not";
         }
         async function loadModels() {
             try {
@@ -800,7 +819,15 @@ gateway down?                 →  engine keeps serving; only that MCP server st
                 : `<div class="hint">no model loaded — load one from Models</div>`;
             const p = rt.props || {};
             const mem = rt.memory || {};
+            const ver = e.version || {};
+            const vbin = ver.binary || {};
+            const verText = vbin.found === false
+                ? "llama.cpp binary missing"
+                : ver.build
+                    ? `llama.cpp ${vbin.version || "?"} · build ${ver.build}${ver.match === false ? " ⚠ mismatch vs binary" : ""}`
+                    : null;
             $("rtMeta").textContent = [
+                verText,
                 p.model_ftype || null,
                 p.n_ctx ? `ctx ${p.n_ctx}` : null,
                 s.total ? `slots ${s.busy || 0}/${s.total} busy` : null,
@@ -1293,6 +1320,20 @@ gateway down?                 →  engine keeps serving; only that MCP server st
                 const ePill = $("pillEngine");
                 ePill.className = "pill " + (ok ? "ok" : "bad");
                 ePill.textContent = "engine: " + s.llama.health;
+                const v = s.llama.version || {};
+                const b = v.binary || {};
+                const vPill = $("pillVersion");
+                const build = v.build || b.build || null;
+                vPill.textContent = b.found === false
+                    ? "llama.cpp missing"
+                    : "llama.cpp " + (b.version || "?") + (build ? " · b" + build : "");
+                vPill.className = "pill " + (b.found === false ? "bad" : v.match === false ? "warn" : "ok");
+                vPill.title = [
+                    "binary: " + (b.raw || "(no output)"),
+                    "props: " + (v.props?.raw || "(engine down — /props unavailable)"),
+                    v.match === true ? "build ids match" : v.match === false ? "BUILD MISMATCH — running engine differs from the binary on disk" : "match unknown (need both sources)",
+                    "source: " + (v.source || "—"),
+                ].join("\n");
                 $("pillTls").textContent = s.llama.tls ? "TLS on" : "TLS off";
                 $("pillTls").className = "pill " + (s.llama.tls ? "ok" : "");
                 $("pillUds").textContent = s.llama.uds ? "UDS on" : "UDS off";
