@@ -1,0 +1,14 @@
+[Unit]
+Description=Llama.cpp management wrapper (lama)
+After=network-online.target
+
+[Service]
+WorkingDirectory={{LAMA_DIR}}/server
+EnvironmentFile={{LAMA_DIR}}/.env
+Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node {{LAMA_DIR}}/server/server.mjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

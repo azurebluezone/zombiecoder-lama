@@ -1,0 +1,18 @@
+# secrets and machine state — never commit
+.env
+.env.bak.*
+certs/
+data/
+logs/
+models/
+*.sock
+
+# agent workspace (SSOT, syllabus, session memory)
+.zombiecoder/
+
+# editor / OS noise
+node_modules/
+.DS_Store
+*.log
+*.part
+*.tmp

@@ -1,0 +1,1505 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>lama · Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            --bg: #171a1d;
+            --side: #101315;
+            --top: #101315;
+            --panel: #1b1f22;
+            --panel2: #15191c;
+            --line: #2a2f33;
+            --muted: #78838b;
+            --text: #dce2e5;
+            --white: #f4f7f8;
+            --green: #20c96b;
+            --green2: #123b25;
+            --green3: #17492c;
+            --red: #ef6464;
+            --amber: #e8b455;
+            --blue: #73a9ff
+        }
+
+        * { box-sizing: border-box }
+        html, body { height: 100%; margin: 0 }
+        body.modal-open { overflow: hidden }
+        body {
+            background: var(--bg); color: var(--text);
+            font: 12px Inter, system-ui, sans-serif;
+            display: flex; flex-direction: column; overflow: hidden
+        }
+        .mono { font-family: "JetBrains Mono", ui-monospace, monospace }
+
+        .topbar {
+            height: 52px; flex: 0 0 52px; background: var(--top);
+            border-bottom: 1px solid var(--line);
+            display: flex; align-items: center; gap: 14px; padding: 0 16px
+        }
+        .logo {
+            width: 22px; height: 22px; border-radius: 6px; background: var(--green);
+            color: #072411; display: grid; place-items: center;
+            font-size: 12px; font-weight: 800
+        }
+        .brand { color: var(--white); font-weight: 700; font-size: 12px; white-space: nowrap }
+        .brand span { color: var(--muted); font-weight: 500 }
+        .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px }
+        .pill {
+            border: 1px solid var(--line); background: var(--panel);
+            color: var(--muted); padding: 4px 9px; border-radius: 6px;
+            font-size: 10px; white-space: nowrap
+        }
+        .pill.ok { border-color: #17472d; background: #0c2115; color: #65e69a }
+        .pill.warn { border-color: #4a3a12; background: #241c08; color: var(--amber) }
+        .pill.bad { border-color: #4a1c1c; background: #210c0c; color: #f0a0a0 }
+
+        .shell { display: flex; min-height: 0; flex: 1 }
+        .sidebar {
+            width: 200px; flex: 0 0 200px; background: var(--side);
+            border-right: 1px solid var(--line); padding: 12px 10px;
+            display: flex; flex-direction: column; gap: 2px
+        }
+        .group-label {
+            color: var(--muted); font-size: 9px; text-transform: uppercase;
+            letter-spacing: .12em; padding: 10px 10px 5px
+        }
+        .nav {
+            display: flex; align-items: center; gap: 9px; width: 100%;
+            padding: 8px 10px; border: 0; background: none; color: var(--muted);
+            font: 500 12px Inter, sans-serif; border-radius: 7px; cursor: pointer; text-align: left
+        }
+        .nav:hover { background: var(--panel); color: var(--text) }
+        .nav.active { background: var(--green3); color: var(--green) }
+        .main { flex: 1; min-width: 0; overflow: auto; padding: 18px 20px 30px }
+
+        .view { display: none }
+        .view.active { display: block }
+        h1 { color: var(--white); font-size: 16px; margin: 0 0 14px }
+        .panel {
+            background: var(--panel); border: 1px solid var(--line);
+            border-radius: 9px; padding: 14px 16px; margin-bottom: 14px
+        }
+        .panel-title { color: var(--white); font-size: 11px; font-weight: 600; margin: 0 0 10px; letter-spacing: .04em }
+        .grid { display: grid; gap: 12px }
+        .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)) }
+        .kpi { background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px }
+        .kpi b { display: block; color: var(--white); font-size: 20px; font-weight: 700 }
+        .kpi span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em }
+
+        table { width: 100%; border-collapse: collapse; font-size: 12px }
+        th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); font-size: 10px; text-transform: uppercase; letter-spacing: .06em }
+        td { padding: 7px 8px; border-bottom: 1px solid var(--line) }
+        tr:last-child td { border-bottom: 0 }
+        td code { color: var(--blue); font-size: 11px }
+
+        button.act {
+            background: var(--green); color: #072411; border: 0; border-radius: 7px;
+            padding: 7px 13px; cursor: pointer; font: 600 11px Inter, sans-serif
+        }
+        button.act:hover { filter: brightness(1.08) }
+        button.ghost {
+            background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+            border-radius: 7px; padding: 7px 13px; cursor: pointer; font: 500 11px Inter, sans-serif
+        }
+        button.ghost:hover { border-color: #3b4550 }
+        button.ghost.danger { color: #f0a0a0; border-color: #4a1c1c }
+        button:disabled { opacity: .35; cursor: not-allowed }
+        button.eye {
+            background: none; border: 0; cursor: pointer; color: var(--muted);
+            font-size: 12px; padding: 0 4px; line-height: 1
+        }
+        button.eye:hover { color: var(--blue) }
+        input, select {
+            background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+            border-radius: 7px; padding: 7px 10px; font: 12px "JetBrains Mono", monospace
+        }
+        input:focus, select:focus { outline: 0; border-color: var(--green) }
+        label.f { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px }
+
+        #testOut, #logOut, #engineOut {
+            font: 11px/1.7 "JetBrains Mono", monospace; color: var(--muted);
+            white-space: pre-wrap; max-height: 380px; overflow: auto; margin: 0
+        }
+        .pass { color: var(--green) } .fail { color: var(--red) } .skip { color: var(--amber) }
+        .row { display: flex; gap: 10px; align-items: end; flex-wrap: wrap }
+
+        /* busy overlay — slow machine: user must not wander */
+        #busy {
+            position: fixed; inset: 0; z-index: 80; display: none;
+            background: rgba(10, 12, 14, .55); backdrop-filter: blur(1.5px);
+            align-items: flex-start; justify-content: center; padding-top: 14vh
+        }
+        #busyCard {
+            background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 16px 20px; display: flex; align-items: center; gap: 14px;
+            box-shadow: 0 18px 50px rgba(0,0,0,.5); min-width: 300px
+        }
+        .spinner {
+            width: 18px; height: 18px; border-radius: 50%;
+            border: 2px solid var(--line); border-top-color: var(--green);
+            animation: spin .8s linear infinite; flex: 0 0 18px
+        }
+        @keyframes spin { to { transform: rotate(360deg) } }
+        #busyLabel { color: var(--white); font-size: 12px; font-weight: 600 }
+        #busyHint { color: var(--muted); font-size: 10px; margin-top: 2px }
+        body.is-busy button, body.is-busy input, body.is-busy select { pointer-events: none; opacity: .4 }
+
+        #modalWrap { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 90 }
+        #modal { width: min(420px, 92vw); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px }
+        #modal h3 { color: var(--white); font-size: 13px; margin: 0 0 12px }
+        #toast {
+            position: fixed; right: 16px; bottom: 16px; z-index: 100; display: none;
+            background: var(--panel); border: 1px solid var(--line); color: var(--text);
+            border-radius: 9px; padding: 10px 14px; max-width: 430px; font-size: 11px
+        }
+        .checklist { list-style: none; margin: 0; padding: 0 }
+        .checklist li { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 11px }
+        .checklist li:last-child { border-bottom: 0 }
+        .checklist .tag { flex: 0 0 46px; font-size: 9px; font-weight: 700; letter-spacing: .08em }
+        .checklist .name { color: var(--white); flex: 0 0 150px }
+        .checklist .detail { color: var(--muted); word-break: break-word }
+
+        .card-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)) }
+        .mcard {
+            background: var(--panel2); border: 1px solid var(--line); border-radius: 10px;
+            padding: 12px 14px; display: flex; flex-direction: column; gap: 8px
+        }
+        .mcard h4 { margin: 0; color: var(--white); font-size: 12px; font-weight: 600; word-break: break-all }
+        .mcard .rowline { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; color: var(--muted) }
+        .mcard .rowline b { color: var(--text); font-weight: 600 }
+        .mcard .actions { display: flex; gap: 6px; margin-top: 2px }
+        textarea {
+            background: var(--panel2); border: 1px solid var(--line); color: var(--text);
+            border-radius: 7px; padding: 8px 10px; font: 11px/1.6 "JetBrains Mono", monospace;
+            width: 100%; resize: vertical; min-height: 92px
+        }
+        textarea:focus { outline: 0; border-color: var(--green) }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 10px }
+        .hint { color: var(--muted); font-size: 10px; line-height: 1.6 }
+        .badge { font-size: 9px; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap }
+        .badge.ok { color: #65e69a; border-color: #17472d; background: #0c2115 }
+        .badge.bad { color: #f0a0a0; border-color: #4a1c1c; background: #210c0c }
+        .badge.busy { color: var(--amber); border-color: #4a3a12; background: #241c08 }
+        .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px }
+        @media (max-width: 980px) { .split { grid-template-columns: 1fr } }
+
+        .tablewrap { overflow-x: auto }
+        .modalwrap {
+            position: fixed; inset: 0; background: rgba(0, 0, 0, .62); display: none;
+            align-items: center; justify-content: center; z-index: 90; padding: 16px
+        }
+        .modalwrap.open { display: flex }
+        .modalbox {
+            width: min(460px, 94vw); background: var(--panel); border: 1px solid var(--line);
+            border-radius: 10px; padding: 16px 18px; max-height: 90vh; overflow: auto
+        }
+        .modalbox.wide { width: min(760px, 96vw) }
+        .modalbox h3 { color: var(--white); font-size: 13px; margin: 0 0 12px }
+        .modalbox .step { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; margin: 0 0 12px }
+        .modalbox .step b { color: var(--green) }
+        .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; flex-wrap: wrap }
+        .resultbox {
+            background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+            padding: 10px 12px; margin-top: 10px; font: 11px/1.6 "JetBrains Mono", monospace;
+            color: var(--muted); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto
+        }
+        .resultbox.pass { border-color: #17472d; color: #b8e7c7 }
+        .resultbox.fail { border-color: #4a1c1c; color: #f0c0c0 }
+        .badge + .badge { margin-left: 4px }
+        :focus-visible { outline: 2px solid var(--green); outline-offset: 1px }
+
+        @media (max-width: 860px) {
+            .shell { flex-direction: column }
+            .sidebar {
+                width: 100%; flex: 0 0 auto; flex-direction: row; align-items: center;
+                border-right: 0; border-bottom: 1px solid var(--line);
+                padding: 6px 8px; overflow-x: auto
+            }
+            .group-label { display: none }
+            .nav { width: auto; white-space: nowrap; flex: 0 0 auto }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="topbar">
+        <div class="logo">L</div>
+        <div class="brand">lama <span>· llama.cpp manager</span></div>
+        <div class="top-actions">
+            <span class="pill" id="pillEngine">engine: …</span>
+            <span class="pill" id="pillTls">TLS off</span>
+            <span class="pill" id="pillUds">UDS off</span>
+            <input id="apiKey" placeholder="API key (optional)" size="14" style="font-size:11px">
+            <button class="ghost" onclick="refresh()">refresh</button>
+        </div>
+    </div>
+
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="group-label">Workspace</div>
+            <button class="nav active" data-view="overview">Overview</button>
+            <button class="nav" data-view="chat">Chat lab</button>
+            <button class="nav" data-view="metrics">Metrics</button>
+            <div class="group-label">Engine</div>
+            <button class="nav" data-view="models">Models</button>
+            <button class="nav" data-view="tests">Self-tests</button>
+            <button class="nav" data-view="logs">Logs</button>
+            <div class="group-label">Control</div>
+            <button class="nav" data-view="prompts">System prompts</button>
+            <button class="nav" data-view="mcp">MCP servers</button>
+        </aside>
+
+        <main class="main">
+            <!-- ===================== OVERVIEW ===================== -->
+            <section class="view active" id="view-overview">
+                <h1>Overview</h1>
+
+                <div class="panel">
+                    <div class="row" style="justify-content:space-between">
+                        <div class="row" style="gap:8px;align-items:center">
+                            <span class="pill" id="statePill">checking…</span>
+                            <span id="stateText" style="color:var(--white);font-weight:600">—</span>
+                            <span class="mono" id="stateModel" style="color:var(--muted);font-size:11px"></span>
+                        </div>
+                        <div class="row" style="gap:8px;align-items:center">
+                            <span class="mono" id="expires" style="color:var(--amber);font-size:11px"></span>
+                            <button class="ghost danger" id="btnUnload" onclick="unload()" disabled>unload now</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid kpi-grid">
+                    <div class="kpi"><b id="kReq">0</b><span>requests</span></div>
+                    <div class="kpi"><b id="kErr">0</b><span>errors 4xx/5xx</span></div>
+                    <div class="kpi"><b id="kAvg">–</b><span>avg latency</span></div>
+                    <div class="kpi"><b id="kMax">–</b><span>max latency</span></div>
+                    <div class="kpi"><b id="kBytes">0</b><span>bytes served</span></div>
+                </div>
+
+                <div class="panel" style="margin-top:14px">
+                    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+                        <div class="panel-title" style="margin:0">Model runtime <span class="hint">— live from /props · /slots · /metrics · /proc/&lt;pid&gt;/maps</span></div>
+                        <span class="pill" id="rtPill">slots …</span>
+                    </div>
+                    <div class="grid card-grid" id="runtimeCards">
+                        <div class="hint">loading runtime…</div>
+                    </div>
+                    <div class="hint mono" id="rtMeta" style="margin-top:10px"></div>
+                </div>
+
+                <div class="panel" style="margin-top:14px">
+                    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+                        <div class="panel-title" style="margin:0">Runtime preflight</div>
+                        <button class="act" onclick="runPreflight(this)">run preflight</button>
+                    </div>
+                    <ul class="checklist" id="preflightList">
+                        <li><span class="tag" style="color:var(--muted)">—</span><span class="name">not run</span><span class="detail">OS · llama.cpp · models · server · model · OpenAI · Anthropic</span></li>
+                    </ul>
+                </div>
+            </section>
+
+            <!-- ===================== METRICS ===================== -->
+            <section class="view" id="view-metrics">
+                <h1>Metrics</h1>
+                <div class="panel">
+                    <div class="panel-title">Per-model matrix <span class="hint">— proxied requests (usage parsed from JSON/SSE)</span></div>
+                    <table>
+                        <thead><tr><th>model</th><th>calls</th><th>errors</th><th>prompt tok</th><th>completion tok</th><th>total tok</th><th>avg ms</th><th>max ms</th><th>last</th></tr></thead>
+                        <tbody id="metricRows"><tr><td colspan="9" style="color:var(--muted)">no proxied requests yet</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Chat lab runs <span class="hint">— every format, stored in SQLite</span></div>
+                    <div class="grid kpi-grid" style="margin-bottom:12px">
+                        <div class="kpi"><b id="cTotRuns">0</b><span>runs</span></div>
+                        <div class="kpi"><b id="cTotPrompt">0</b><span>prompt tokens</span></div>
+                        <div class="kpi"><b id="cTotCompletion">0</b><span>completion tokens</span></div>
+                        <div class="kpi"><b id="cTotAll">0</b><span>total tokens</span></div>
+                    </div>
+                    <table>
+                        <thead><tr><th>model</th><th>calls</th><th>errors</th><th>prompt tok</th><th>completion tok</th><th>total tok</th><th>avg ms</th><th>last</th></tr></thead>
+                        <tbody id="chatMetricRows"><tr><td colspan="8" style="color:var(--muted)">no chat lab runs yet</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Self-test matrix</div>
+                    <table>
+                        <thead><tr><th>test</th><th>runs</th><th>pass</th><th>fail</th><th>skipped</th><th>avg ms</th><th>last</th></tr></thead>
+                        <tbody id="testRows"><tr><td colspan="7" style="color:var(--muted)">no tests run yet</td></tr></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- ===================== MODELS ===================== -->
+            <section class="view" id="view-models">
+                <h1>Models</h1>
+
+                <div class="panel">
+                    <div class="row" style="justify-content:space-between;margin-bottom:10px">
+                        <div class="panel-title" style="margin:0">Model list <span class="hint">— green = loaded, red = unloaded, <b style="color:var(--green)">map</b> = registered in the gateway</span></div>
+                        <div class="row" style="gap:6px">
+                            <button class="ghost" onclick="loadModels(this)">reload</button>
+                            <button class="act" onclick="syncModels(this)">sync</button>
+                        </div>
+                    </div>
+                    <div class="tablewrap">
+                        <table>
+                            <thead><tr><th>model</th><th>state</th><th>size</th><th>source</th><th>repo</th><th>path</th><th>actions</th></tr></thead>
+                            <tbody id="modelRows"><tr><td colspan="7" style="color:var(--muted)">loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">Download <span class="hint">— models/catalog.json ledger, same repo+file is downloaded once</span></div>
+                    <div class="row">
+                        <div><label class="f" for="dlRepo">HuggingFace repo</label><input id="dlRepo" placeholder="org/name" size="26"></div>
+                        <div><label class="f" for="dlFile">file</label><input id="dlFile" placeholder="model.gguf" size="20"></div>
+                        <button class="act" onclick="download(this)">download</button>
+                        <span class="mono" style="color:var(--muted);font-size:10px" id="dlResult"></span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ===================== TESTS ===================== -->
+            <section class="view" id="view-tests">
+                <h1>Protocol self-tests</h1>
+                <div class="panel">
+                    <div class="panel-title">Pick a protocol <span class="hint">— the button checks that protocol's route on the live engine</span></div>
+                    <div class="row" style="gap:8px">
+                        <button class="ghost" data-test="http" onclick="runTest('http', this)">HTTP health</button>
+                        <button class="ghost" data-test="https" onclick="runTest('https', this)">HTTPS (native TLS)</button>
+                        <button class="ghost" data-test="uds" onclick="runTest('uds', this)">UDS</button>
+                        <button class="ghost" data-test="openai" onclick="runTest('openai', this)">OpenAI non-stream</button>
+                        <button class="ghost" data-test="stream" onclick="runTest('stream', this)">OpenAI stream</button>
+                        <button class="ghost" data-test="anthropic" onclick="runTest('anthropic', this)">Anthropic Messages</button>
+                        <button class="ghost" data-test="tools" onclick="runTest('tools', this)">Tool call</button>
+                        <button class="ghost" onclick="clearTests()">clear</button>
+                    </div>
+                    <p class="hint" style="margin:10px 0 0">OpenAI covers non-stream and stream (<code>stream:true</code>); Tool call covers <code>/v1/chat/completions</code> with <code>tools[]</code>. HTTPS reports skipped when <code>LAMA_SSL_*</code> is not configured — engine-native TLS is off by design.</p>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Results</div>
+                    <div class="tablewrap">
+                        <table>
+                            <thead><tr><th>protocol</th><th>route</th><th>status</th><th>ms</th><th>detail</th><th>last</th></tr></thead>
+                            <tbody id="testResultRows"><tr><td colspan="6" style="color:var(--muted)">no tests run yet — pick a protocol above</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Raw log</div>
+                    <pre id="testOut">no tests run yet</pre>
+                </div>
+            </section>
+
+            <!-- ===================== LOGS ===================== -->
+            <section class="view" id="view-logs">
+                <h1>Logs</h1>
+                <div class="panel">
+                    <div class="row" style="justify-content:space-between;margin-bottom:8px">
+                        <div class="row">
+                            <label class="f" style="margin:0">lines</label>
+                            <input id="logN" type="number" value="50" min="1" max="500" size="5">
+                            <button class="ghost" onclick="loadLogs()">tail</button>
+                        </div>
+                        <label class="row" style="gap:6px;color:var(--muted);font-size:10px;cursor:pointer">
+                            <input type="checkbox" id="onlyReq"> requests only
+                        </label>
+                    </div>
+                    <pre id="logOut">…</pre>
+                </div>
+            </section>
+
+            <!-- ===================== CHAT LAB ===================== -->
+            <section class="view" id="view-chat">
+                <h1>Chat lab</h1>
+                <div class="panel">
+                    <div class="panel-title">Test one model across protocols <span class="hint">— the run is stored with tokens, latency and TTFT</span></div>
+                    <div class="form-grid">
+                        <div><label class="f">model</label><select id="chatModel"></select></div>
+                        <div><label class="f">format</label><select id="chatFormat">
+                            <option value="openai">openai · /v1/chat/completions</option>
+                            <option value="tools">openai · tool call</option>
+                            <option value="anthropic">anthropic · /v1/messages</option>
+                            <option value="responses">openai · /v1/responses</option>
+                            <option value="embeddings">embeddings · /v1/embeddings</option>
+                        </select></div>
+                        <div><label class="f">max tokens</label><input id="chatMax" type="number" value="128" min="1" max="4096"></div>
+                        <div><label class="f">temperature</label><input id="chatTemp" type="number" step="0.1" value="0.7"></div>
+                    </div>
+                    <label class="f">prompt</label>
+                    <textarea id="chatPrompt">Say OK in one short sentence.</textarea>
+                    <div class="row" style="margin-top:8px">
+                        <label class="row" style="gap:6px;color:var(--muted);font-size:10px;cursor:pointer">
+                            <input type="checkbox" id="chatStream"> stream (OpenAI only)
+                        </label>
+                        <button class="act" onclick="chatSend(this)">send test</button>
+                        <span class="hint" id="chatNote">uses the default system prompt unless one is bound to the model</span>
+                    </div>
+                </div>
+                <div class="split">
+                    <div class="panel">
+                        <div class="panel-title">Result</div>
+                        <div class="grid kpi-grid" id="chatKpis" style="margin-bottom:10px">
+                            <div class="kpi"><b id="ckStatus">–</b><span>status</span></div>
+                            <div class="kpi"><b id="ckMs">–</b><span>latency</span></div>
+                            <div class="kpi"><b id="ckTtft">–</b><span>ttft</span></div>
+                            <div class="kpi"><b id="ckTok">–</b><span>tokens</span></div>
+                        </div>
+                        <pre id="chatOut">no run yet</pre>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">Recent runs</div>
+                        <table>
+                            <thead><tr><th>time</th><th>model</th><th>format</th><th>status</th><th>ms</th><th>tok</th></tr></thead>
+                            <tbody id="chatRunRows"><tr><td colspan="6" style="color:var(--muted)">no runs yet</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ===================== PROMPTS ===================== -->
+            <section class="view" id="view-prompts">
+                <div class="row" style="justify-content:space-between;margin-bottom:14px">
+                    <h1 style="margin:0">System prompts</h1>
+                    <button class="act" onclick="openPromptModal()">New prompt</button>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Registered prompts <span class="hint">— stored in SQLite; Edit appends an immutable version, then can test the model with it</span></div>
+                    <div class="tablewrap">
+                        <table>
+                            <thead><tr><th>name</th><th>version</th><th>scope</th><th>default</th><th>bindings</th><th>updated</th><th>actions</th></tr></thead>
+                            <tbody id="promptRows"><tr><td colspan="7" style="color:var(--muted)">loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="panel">
+                    <div class="panel-title">Resolved prompt <span class="hint">— what the chat lab sends unless you override it</span></div>
+                    <pre id="promptResolved" class="mono" style="font-size:11px;color:#b8e7c7;white-space:pre-wrap;margin:0">—</pre>
+                </div>
+            </section>
+
+            <!-- ===================== MCP ===================== -->
+            <section class="view" id="view-mcp">
+                <div class="row" style="justify-content:space-between;margin-bottom:14px">
+                    <h1 style="margin:0">MCP servers</h1>
+                    <div class="row" style="gap:6px">
+                        <button class="ghost" onclick="loadMcp()">reload</button>
+                        <button class="act" onclick="openMcpModal()">Add MCP</button>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-title">Registered servers <span class="hint">— test before save; a failing connection is never stored</span></div>
+                    <div class="tablewrap">
+                        <table>
+                            <thead><tr><th>name</th><th>transport</th><th>target</th><th>status</th><th>latency</th><th>tools</th><th>actions</th></tr></thead>
+                            <tbody id="mcpRows"><tr><td colspan="7" style="color:var(--muted)">loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                    <div class="row" style="margin-top:10px;gap:6px">
+                        <button class="ghost" onclick="applyMcp(this)">apply to engine</button>
+                        <button class="ghost" onclick="previewMcp()">preview config</button>
+                        <span class="mono hint" id="mcpConfig"></span>
+                    </div>
+                    <pre id="mcpConfigOut" style="display:none;margin-top:12px"></pre>
+                </div>
+
+                <div class="split">
+                    <div class="panel">
+                        <div class="panel-title">Engine config</div>
+                        <p class="hint" style="margin:0">llama.cpp reads only stdio entries. Remote transports run through <code>server/lib/bridge.mjs</code>; keys stay in 0600 spec files, never in the engine config.</p>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">Fallback flow</div>
+                        <pre class="mono" style="font-size:10px;color:#b8e7c7;white-space:pre-wrap;overflow-wrap:anywhere;margin:0">model can call tools natively  →  engine chat template (finish_reason: tool_calls)
+model cannot                  →  llama.cpp native MCP  --mcp-servers-config &lt;generated&gt;
+                                  stdio server OR bridge (http / sse / uds / openai / anthropic)
+gateway down?                 →  engine keeps serving; only that MCP server stops</pre>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="row" style="justify-content:space-between;margin-bottom:8px">
+                        <div class="panel-title" style="margin:0">Runtime server log <span class="mono" id="engineFile" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+                        <button class="ghost" onclick="loadEngineLogs()">tail</button>
+                    </div>
+                    <pre id="engineOut">…</pre>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="busy">
+        <div id="busyCard">
+            <div class="spinner"></div>
+            <div>
+                <div id="busyLabel">working…</div>
+                <div id="busyHint">slow machine — this can take up to 3 minutes. Keep this tab open.</div>
+            </div>
+        </div>
+    </div>
+
+    <div id="modalWrap">
+        <div id="modal">
+            <h3>Load model: <span id="modalName" class="mono" style="color:var(--green)"></span></h3>
+            <div class="row">
+                <div><label class="f">context</label><input id="mCtx" type="number" value="4096" min="512" size="8"></div>
+                <div><label class="f">keep loaded (hours)</label><input id="mTtl" type="number" step="0.25" min="0" value="2" size="8"></div>
+            </div>
+            <p style="color:var(--muted);font-size:10px;margin:10px 0">0 = stay loaded until you unload. On expiry the manager unloads automatically.</p>
+            <div class="row">
+                <button class="act" onclick="loadConfirm(this)">load</button>
+                <button class="ghost danger" onclick="closeModal()">cancel</button>
+            </div>
+        </div>
+    </div>
+    <div id="promptModalWrap" class="modalwrap" role="dialog" aria-modal="true" aria-labelledby="promptModalTitle">
+        <div class="modalbox wide">
+            <h3 id="promptModalTitle">New system prompt</h3>
+            <div class="form-grid">
+                <div><label class="f" for="pmName">name</label><input id="pmName" placeholder="lama-default"></div>
+                <div><label class="f" for="pmScope">scope</label><select id="pmScope">
+                    <option value="global">global</option>
+                    <option value="model">model</option>
+                    <option value="mcp_server">mcp_server</option>
+                    <option value="experiment">experiment</option>
+                </select></div>
+                <div><label class="f" for="pmTags">tags (comma)</label><input id="pmTags" placeholder="baseline,prod"></div>
+            </div>
+            <label class="f" for="pmContent">content</label>
+            <textarea id="pmContent" placeholder="You are a helpful assistant…"></textarea>
+            <div class="form-grid" style="margin-top:10px">
+                <div><label class="f" for="pmNote">note (why this version)</label><input id="pmNote" placeholder="optional"></div>
+                <div><label class="f" for="pmPrompt">test prompt</label><input id="pmPrompt" value="Reply with OK in one short sentence."></div>
+                <div><label class="f" for="pmModel">test model</label><select id="pmModel"></select></div>
+                <div><label class="f" for="pmMax">test max tokens</label><input id="pmMax" type="number" value="48" min="8" max="512"></div>
+            </div>
+            <div class="step" id="pmVersionNote">new prompt — v1 is written on save</div>
+            <div class="modal-actions">
+                <button class="act" onclick="savePromptModal(this, true)">Save &amp; test</button>
+                <button class="ghost" onclick="savePromptModal(this, false)">Save</button>
+                <button class="ghost" onclick="testPromptModal(this)">Test current content</button>
+                <button class="ghost" onclick="closePromptModal()">Cancel</button>
+            </div>
+            <div id="pmResult" class="resultbox" role="status" aria-live="polite">not tested yet</div>
+        </div>
+    </div>
+
+    <div id="mcpModalWrap" class="modalwrap" role="dialog" aria-modal="true" aria-labelledby="mcpModalTitle">
+        <div class="modalbox wide">
+            <h3 id="mcpModalTitle">Add MCP server</h3>
+            <div class="step"><b>1</b> transport → <b>2</b> target → <b>3</b> test → <b>4</b> save</div>
+            <div class="form-grid">
+                <div><label class="f" for="mmName">name</label><input id="mmName" placeholder="context7"></div>
+                <div><label class="f" for="mmTransport">transport</label><select id="mmTransport" onchange="syncMcpModal()">
+                    <option value="http">http · Streamable HTTP</option>
+                    <option value="sse">sse · legacy HTTP+SSE</option>
+                    <option value="uds">uds · unix socket</option>
+                    <option value="stdio">stdio · local command</option>
+                    <option value="openai">openai · API</option>
+                    <option value="anthropic">anthropic · API</option>
+                </select></div>
+            </div>
+            <div id="mmRemoteFields">
+                <div class="form-grid">
+                    <div><label class="f" for="mmUrl">url <span class="hint" id="mmUrlHint"></span></label><input id="mmUrl" placeholder="http://127.0.0.1:3000/mcp"></div>
+                    <div><label class="f" for="mmKey">api key (optional)</label><input id="mmKey" type="password" autocomplete="off" placeholder="leave empty when the endpoint is open"></div>
+                </div>
+                <div class="form-grid">
+                    <div><label class="f" for="mmHeaders">headers JSON (optional)</label><input id="mmHeaders" placeholder='{"X-Tenant":"a"}'></div>
+                    <div><label class="f" for="mmTimeout">timeout ms</label><input id="mmTimeout" type="number" value="30000" min="1000"></div>
+                </div>
+            </div>
+            <div id="mmStdioFields" style="display:none">
+                <div class="form-grid">
+                    <div><label class="f" for="mmCommand">command</label><input id="mmCommand" placeholder="npx"></div>
+                    <div><label class="f" for="mmArgs">args JSON</label><input id="mmArgs" placeholder='["-y","@scope/server"]'></div>
+                    <div><label class="f" for="mmEnv">env JSON</label><input id="mmEnv" placeholder='{"KEY":"value"}'></div>
+                    <div><label class="f" for="mmCwd">cwd (optional)</label><input id="mmCwd" placeholder="/path"></div>
+                </div>
+            </div>
+            <div class="row" style="margin-top:4px">
+                <label class="row" style="gap:6px;color:var(--muted);font-size:10px;cursor:pointer">
+                    <input type="checkbox" id="mmEnabled" checked> enabled
+                </label>
+                <button class="ghost" onclick="testMcpModal(this)">Test connection</button>
+                <button class="act" id="mmSave" onclick="saveMcpModal(this)" disabled>Save</button>
+                <button class="ghost" onclick="closeMcpModal()">Cancel</button>
+                <span class="hint" id="mmState">test required before save</span>
+            </div>
+            <div id="mmResult" class="resultbox" role="status" aria-live="polite">no test yet</div>
+        </div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script>
+        const $ = (id) => document.getElementById(id);
+        let loaded = false, pendingLoad = null;
+        let modelsCache = [], gatewayState = { configured: false, aliases: [] }, lastRuntime = null;
+
+        $("apiKey").value = localStorage.getItem("lamaKey") || "";
+        $("apiKey").oninput = () => localStorage.setItem("lamaKey", $("apiKey").value.trim());
+        const h = () => $("apiKey").value.trim() ? { Authorization: "Bearer " + $("apiKey").value.trim() } : {};
+
+        async function api(p, init = {}) {
+            const r = await fetch(p, { ...init, headers: { ...h(), "content-type": "application/json" } });
+            const t = await r.text();
+            let body; try { body = JSON.parse(t); } catch { body = t; }
+            if (!r.ok) throw new Error((body && body.error && body.error.message) || r.status + " " + t.slice(0, 140));
+            return body;
+        }
+        const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+        const mb = (n) => (n / 1048576).toFixed(1) + " MB";
+        const toast = (msg) => { const t = $("toast"); t.textContent = msg; t.style.display = "block"; setTimeout(() => t.style.display = "none", 4200); };
+
+        // Slow machine: one blocking operation at a time, all buttons locked.
+        async function withBusy(label, fn) {
+            $("busyLabel").textContent = label;
+            $("busy").style.display = "flex";
+            document.body.classList.add("is-busy");
+            document.querySelectorAll("button").forEach((b) => { b.dataset.was = b.disabled ? "1" : ""; b.disabled = true; });
+            try { return await fn(); }
+            finally {
+                $("busy").style.display = "none";
+                document.body.classList.remove("is-busy");
+                document.querySelectorAll("button").forEach((b) => { b.disabled = b.dataset.was === "1"; });
+                refresh();
+            }
+        }
+
+        document.querySelectorAll(".nav").forEach((b) => b.onclick = () => {
+            document.querySelectorAll(".nav").forEach((x) => x.classList.remove("active"));
+            document.querySelectorAll(".view").forEach((x) => x.classList.remove("active"));
+            b.classList.add("active");
+            $("view-" + b.dataset.view).classList.add("active");
+            if (b.dataset.view === "logs") loadLogs();
+            if (b.dataset.view === "mcp") { loadEngineLogs(); loadMcp(); }
+            if (b.dataset.view === "metrics") refreshMetrics();
+            if (b.dataset.view === "chat") { loadChatModels(); loadChatRuns(); }
+            if (b.dataset.view === "prompts") loadPrompts();
+            if (b.dataset.view === "tests") renderTests();
+        });
+
+        function renderModels(models) {
+            modelsCache = models;
+            const active = lastRuntime?.engine?.alias || null;
+            $("modelRows").innerHTML = models.map((m) => {
+                const isLoaded = active === m.name;
+                const state = isLoaded
+                    ? '<span class="badge ok">loaded</span>'
+                    : '<span class="badge bad">unloaded</span>';
+                const mapped = m.gateway_mapped
+                    ? ' <span class="badge ok" title="registered in the gateway (CP_LLAMACPP_MODELS)">map</span>'
+                    : "";
+                const actions = [
+                    isLoaded
+                        ? `<button class="ghost" onclick="unload(this)">unload</button>`
+                        : `<button class="act" onclick="openModal('${esc(m.name)}')">load</button>`,
+                    (!m.gateway_mapped && gatewayState.configured)
+                        ? `<button class="ghost" onclick="mapModel('${esc(m.name)}', this)">map</button>` : "",
+                ].filter(Boolean).join("");
+                return `<tr><td><b style="color:var(--white)">${esc(m.name)}</b></td>` +
+                    `<td>${state}${mapped}</td><td>${mb(m.size)}</td>` +
+                    `<td><span class="pill">${esc(m.source)}</span></td>` +
+                    `<td>${m.repo ? "<code>" + esc(m.repo) + "</code>" : '<span style="color:var(--muted)">—</span>'}</td>` +
+                    `<td><button class="eye" data-path="${esc(m.path)}" onclick="togglePath(this)" title="show path" aria-label="show path">👁</button></td>` +
+                    `<td><div class="row" style="gap:6px;align-items:center">${actions}</div></td></tr>`;
+            }).join("") || `<tr><td colspan="7" style="color:var(--muted)">no .gguf found — press sync</td></tr>`;
+        }
+        async function loadModels() {
+            try {
+                const r = await api("/api/models");
+                gatewayState = r.gateway || gatewayState;
+                renderModels(r.models || []);
+            } catch (e) { toast(e.message); }
+        }
+        function togglePath(btn) {
+            const td = btn.parentElement;
+            const open = td.querySelector("code");
+            if (open) { open.remove(); btn.textContent = "👁"; btn.title = "show path"; return; }
+            const c = document.createElement("code");
+            c.textContent = btn.dataset.path;
+            c.style.wordBreak = "break-all";
+            td.appendChild(c);
+            btn.textContent = "✕";
+            btn.title = "hide path";
+        }
+
+        async function refreshMetrics() {
+            const met = await api("/api/metrics");
+            $("metricRows").innerHTML = Object.entries(met.models).map(([n, m]) =>
+                `<tr><td>${esc(n)}</td><td>${m.calls}</td><td>${m.errors}</td><td>${m.prompt_tokens || 0}</td>` +
+                `<td>${m.completion_tokens || 0}</td><td><b>${m.total_tokens || 0}</b></td>` +
+                `<td>${m.ms_avg}</td><td>${m.max_ms}</td>` +
+                `<td style="color:var(--muted)">${esc((m.last || "").slice(11, 19))}</td></tr>`
+            ).join("") || `<tr><td colspan="9" style="color:var(--muted)">no proxied requests yet</td></tr>`;
+
+            const stats = await api("/api/chat/stats");
+            const t = stats.totals || {};
+            $("cTotRuns").textContent = t.runs || 0;
+            $("cTotPrompt").textContent = t.prompt_tokens || 0;
+            $("cTotCompletion").textContent = t.completion_tokens || 0;
+            $("cTotAll").textContent = t.total_tokens || 0;
+            $("chatMetricRows").innerHTML = (stats.models || []).map((m) =>
+                `<tr><td>${esc(m.model || "—")}</td><td>${m.calls}</td><td>${m.errors}</td>` +
+                `<td>${m.prompt_tokens}</td><td>${m.completion_tokens}</td><td><b>${m.total_tokens}</b></td>` +
+                `<td>${m.ms_avg}</td><td style="color:var(--muted)">${esc((m.last || "").slice(11, 19))}</td></tr>`
+            ).join("") || `<tr><td colspan="8" style="color:var(--muted)">no chat lab runs yet</td></tr>`;
+
+            $("testRows").innerHTML = Object.entries(met.tests).map(([k, t]) =>
+                `<tr><td>${esc(k)}</td><td>${t.runs}</td><td class="pass">${t.pass}</td><td class="fail">${t.fail}</td>` +
+                `<td class="skip">${t.skipped}</td><td>${t.ms_avg}</td><td style="color:var(--muted)">${esc((t.last || "").slice(11, 19))}</td></tr>`
+            ).join("") || `<tr><td colspan="7" style="color:var(--muted)">no tests run yet</td></tr>`;
+            return met;
+        }
+
+        /* ------------------------------------------------------------ runtime */
+        function renderRuntime(rt) {
+            if (!rt || !rt.engine) return;
+            const e = rt.engine, s = rt.slots || {};
+            const badge = e.state === "generating" ? "busy" : e.state === "idle" ? "ok" : "bad";
+            $("rtPill").textContent = `slots ${s.busy || 0}/${s.total || 0} busy`;
+            $("rtPill").className = "pill " + (e.state === "generating" ? "warn" : e.state === "idle" ? "ok" : "bad");
+
+            const totals = rt.chat_lab?.totals || {};
+            const byModel = Object.fromEntries((rt.chat_lab?.models || []).map((m) => [m.model, m]));
+            const card = (name, opts = {}) => {
+                const m = byModel[name] || {};
+                const isActive = e.alias === name;
+                const state = isActive ? e.state : "not-loaded";
+                const cls = state === "generating" ? "busy" : state === "idle" ? "ok" : "";
+                return `<div class="mcard">
+                    <div class="row" style="justify-content:space-between;align-items:center">
+                        <h4>${esc(name)}</h4><span class="badge ${cls}">${state}</span>
+                    </div>
+                    <div class="rowline"><span>chat calls</span><b>${m.calls || 0}</b></div>
+                    <div class="rowline"><span>tokens used</span><b>${m.total_tokens || 0}</b></div>
+                    <div class="rowline"><span>avg latency</span><b>${m.ms_avg ? m.ms_avg + " ms" : "—"}</b></div>
+                    <div class="rowline"><span>last run</span><b>${m.last ? esc(m.last.slice(11, 19)) : "—"}</b></div>
+                    ${isActive ? `<div class="rowline"><span>slots</span><b>${s.busy || 0} busy / ${s.total || 0}</b></div>` : ""}
+                    <div class="actions">
+                        <button class="ghost" onclick="chatFor('${esc(name)}')">chat</button>
+                        ${opts.loadable && !loaded ? `<button class="act" onclick="openModal('${esc(name)}')">load</button>` : ""}
+                    </div>
+                </div>`;
+            };
+            const names = rt.names && rt.names.length ? rt.names : [e.alias].filter(Boolean);
+            $("runtimeCards").innerHTML = names.length
+                ? names.map((n) => card(n, { loadable: true })).join("")
+                : `<div class="hint">no model loaded — load one from Models</div>`;
+            const p = rt.props || {};
+            const mem = rt.memory || {};
+            $("rtMeta").textContent = [
+                p.model_ftype || null,
+                p.n_ctx ? `ctx ${p.n_ctx}` : null,
+                s.total ? `slots ${s.busy || 0}/${s.total} busy` : null,
+                mem.source ? `mmap ${mem.mapped_regions} region(s) · ${mem.shared_mib} MB shared` : "mmap n/a (no /proc maps)",
+                mem.shm_segments ? `${mem.shm_segments} shm segment(s)` : null,
+                p.metrics_enabled === false ? "engine /metrics off (start with --metrics)" : p.metrics_enabled ? "engine /metrics on" : null,
+                rt.log_file ? `log ${rt.log_file.split("/").pop()}` : null,
+            ].filter(Boolean).join(" · ");
+        }
+
+        async function refreshRuntime() {
+            try {
+                const rt = await api("/api/runtime");
+                const prevAlias = lastRuntime?.engine?.alias || null;
+                lastRuntime = rt;
+                renderRuntime(rt);
+                if (modelsCache.length && prevAlias !== (rt.engine?.alias || null)) renderModels(modelsCache);
+            } catch (e) { $("runtimeCards").innerHTML = `<div class="hint">runtime unavailable: ${esc(e.message)}</div>`; }
+        }
+
+        /* ---------------------------------------------------------------- MCP */
+        const TRANSPORT_HINT = {
+            http: "endpoint URL (…/mcp)",
+            sse: "endpoint URL (…/sse)",
+            uds: "unix:///path/to.sock/mcp",
+            stdio: "not used — set command instead",
+            openai: "base URL (…/v1 or host)",
+            anthropic: "base URL (…/v1 or host)",
+        };
+        let mcpCtx = { id: null, tested: false, hasKey: false };
+
+        function syncMcpModal() {
+            const t = $("mmTransport").value;
+            const stdio = t === "stdio";
+            $("mmUrlHint").textContent = TRANSPORT_HINT[t] || "";
+            $("mmRemoteFields").style.display = stdio ? "none" : "";
+            $("mmStdioFields").style.display = stdio ? "" : "none";
+            markMcpUntested();
+        }
+        function markMcpUntested() {
+            mcpCtx.tested = false;
+            $("mmSave").disabled = true;
+            $("mmState").textContent = "test required before save";
+        }
+        function mcpJson(id, fallback, label) {
+            const raw = $(id).value.trim();
+            if (!raw) return fallback;
+            try { return JSON.parse(raw); } catch { throw new Error(label + " must be valid JSON"); }
+        }
+        function mcpModalPayload() {
+            const t = $("mmTransport").value;
+            const p = {
+                name: $("mmName").value.trim(), transport: t,
+                headers: mcpJson("mmHeaders", {}, "headers"),
+                timeout_ms: Number($("mmTimeout").value) || 30000,
+                enabled: $("mmEnabled").checked,
+            };
+            if (t === "stdio") {
+                p.command = $("mmCommand").value.trim();
+                p.cwd = $("mmCwd").value.trim();
+                if ($("mmArgs").value.trim()) p.args = mcpJson("mmArgs", [], "args");
+                else if (!mcpCtx.id) p.args = [];
+                if ($("mmEnv").value.trim()) p.env = mcpJson("mmEnv", {}, "env");
+                else if (!mcpCtx.id) p.env = {};
+            } else {
+                p.url = $("mmUrl").value.trim();
+                const key = $("mmKey").value;
+                if (key || !mcpCtx.id) p.api_key = key;
+            }
+            if (mcpCtx.id) p.id = mcpCtx.id;
+            return p;
+        }
+        async function openMcpModal(id) {
+            mcpCtx = { id: id || null, tested: false, hasKey: false };
+            $("mcpModalTitle").textContent = id ? "Edit MCP server" : "Add MCP server";
+            ["mmName", "mmUrl", "mmKey", "mmHeaders", "mmCommand", "mmArgs", "mmEnv", "mmCwd"].forEach((k) => { $(k).value = ""; });
+            $("mmTimeout").value = "30000";
+            $("mmEnabled").checked = true;
+            $("mmTransport").value = "http";
+            $("mmKey").placeholder = "leave empty when the endpoint is open";
+            $("mmResult").textContent = "no test yet";
+            $("mmResult").className = "resultbox";
+            $("mmState").textContent = "test required before save";
+            $("mmSave").disabled = true;
+            syncMcpModal();
+            openModalWrap("mcpModalWrap", "mmName");
+            if (!id) return;
+            try {
+                const s = await api(`/api/mcp/${id}`);
+                $("mmName").value = s.name || "";
+                $("mmTransport").value = s.transport || "http";
+                $("mmUrl").value = s.url || "";
+                $("mmHeaders").value = JSON.stringify(s.headers || {});
+                $("mmTimeout").value = String(s.timeout_ms || 30000);
+                $("mmEnabled").checked = Boolean(s.enabled);
+                $("mmCommand").value = s.command || "";
+                $("mmArgs").value = JSON.stringify(s.args || []);
+                $("mmCwd").value = s.cwd || "";
+                $("mmEnv").placeholder = '{"KEY":"value"} — blank keeps the stored env';
+                mcpCtx.hasKey = Boolean(s.has_key);
+                $("mmKey").placeholder = s.has_key ? "stored key — leave empty to keep it" : "leave empty when the endpoint is open";
+                syncMcpModal();
+            } catch (e) {
+                $("mmResult").textContent = "load failed: " + e.message;
+                $("mmResult").className = "resultbox fail";
+            }
+        }
+        function closeMcpModal() { closeModalWrap("mcpModalWrap"); }
+
+        async function testMcpModal(btn) {
+            const out = $("mmResult");
+            out.className = "resultbox";
+            out.textContent = "testing…";
+            $("mmState").textContent = "testing…";
+            if (btn) btn.disabled = true;
+            try {
+                const payload = mcpModalPayload();
+                const r = await api("/api/mcp/test", { method: "POST", body: JSON.stringify(payload) });
+                mcpCtx.tested = Boolean(r.ok);
+                out.className = "resultbox " + (r.ok ? "pass" : "fail");
+                out.textContent = `${r.ok ? "test success" : "test failed"} · ${r.latency_ms}ms · ${r.detail || ""}` +
+                    (r.tools_count != null ? ` · tools=${r.tools_count}` : "");
+                $("mmSave").disabled = !r.ok;
+                $("mmState").textContent = r.ok
+                    ? "test success — save enabled"
+                    : "test failed — nothing will be stored";
+            } catch (e) {
+                mcpCtx.tested = false;
+                out.className = "resultbox fail";
+                out.textContent = "test failed · " + e.message;
+                $("mmSave").disabled = true;
+                $("mmState").textContent = "test failed — nothing will be stored";
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function saveMcpModal(btn) {
+            if (!mcpCtx.tested) return toast("test the connection first");
+            const out = $("mmResult");
+            if (btn) btn.disabled = true;
+            try {
+                const payload = mcpModalPayload();
+                let saved;
+                if (mcpCtx.id) {
+                    saved = await api(`/api/mcp/${mcpCtx.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+                    const probe = await api(`/api/mcp/${mcpCtx.id}/test`, { method: "POST", body: "{}" });
+                    out.className = "resultbox " + (probe.ok ? "pass" : "fail");
+                    out.textContent = `saved ${saved.name} · re-test ${probe.ok ? "PASS" : "FAIL"} · ${probe.detail || ""}`;
+                } else {
+                    saved = await api("/api/mcp", { method: "POST", body: JSON.stringify({ ...payload, test_first: true }) });
+                    out.className = "resultbox pass";
+                    out.textContent = `saved ${saved.name} · test success · ${saved.probe ? saved.probe.detail : ""}`;
+                }
+                await loadMcp();
+                closeMcpModal();
+                toast("MCP server saved: " + saved.name);
+            } catch (e) {
+                mcpCtx.tested = false;
+                out.className = "resultbox fail";
+                out.textContent = "not saved · " + e.message;
+                $("mmSave").disabled = true;
+                $("mmState").textContent = "save failed — fix and test again";
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function loadMcp() {
+            try {
+                const r = await api("/api/mcp");
+                const rows = r.servers || [];
+                $("mcpRows").innerHTML = rows.map((s) => {
+                    const cls = s.status === "ok" ? "ok" : s.status === "fail" ? "bad" : "";
+                    const target = s.transport === "stdio" ? `${s.command} ${(s.args || []).join(" ")}` : s.url;
+                    return `<tr>
+                        <td><b style="color:var(--white)">${esc(s.name)}</b>${s.enabled ? "" : ' <span class="badge">disabled</span>'}</td>
+                        <td><span class="badge">${esc(s.transport)}</span></td>
+                        <td><code style="word-break:break-all">${esc(target || "—")}</code></td>
+                        <td><span class="badge ${cls}">${esc(s.status)}</span></td>
+                        <td>${s.last_latency_ms != null ? s.last_latency_ms + " ms" : "—"}</td>
+                        <td>${s.last_tools_count != null ? s.last_tools_count : "—"}</td>
+                        <td><div class="row" style="gap:6px;flex-wrap:wrap">
+                            <button class="ghost" onclick="openMcpModal(${s.id})">edit</button>
+                            <button class="ghost" onclick="retestMcp(${s.id})">test</button>
+                            <button class="ghost danger" onclick="delMcp(${s.id})">delete</button>
+                        </div></td>
+                    </tr>`;
+                }).join("") || `<tr><td colspan="7" style="color:var(--muted)">no MCP server stored yet — press Add MCP</td></tr>`;
+            } catch (e) { $("mcpRows").innerHTML = `<tr><td colspan="7" class="fail">${esc(e.message)}</td></tr>`; }
+        }
+
+        async function retestMcp(id) {
+            await withBusy("testing MCP server…", async () => {
+                try {
+                    const r = await api(`/api/mcp/${id}/test`, { method: "POST", body: "{}" });
+                    toast(`${r.ok ? "PASS" : "FAIL"} · ${r.latency_ms}ms · ${r.detail}`);
+                } catch (e) { toast("test failed · " + e.message); }
+            });
+            await loadMcp();
+        }
+
+        async function delMcp(id) {
+            if (!confirm("Delete this MCP server?")) return;
+            try {
+                await api(`/api/mcp/${id}`, { method: "DELETE" });
+                toast("MCP server deleted");
+            } catch (e) { toast(e.message); }
+            await loadMcp();
+        }
+        async function applyMcp() {
+            const r = await api("/api/mcp/apply", { method: "POST", body: "{}" });
+            toast(`config written (${r.servers.length} server(s)) — reload the model to apply`);
+            await loadMcp();
+        }
+        async function previewMcp() {
+            const out = $("mcpConfigOut");
+            const r = await api("/api/config");
+            out.style.display = "block";
+            out.textContent = r.mcp_config || "no generated config yet";
+        }
+
+        /* ----------------------------------------------------------- chat lab */
+        async function loadChatModels() {
+            try {
+                const { models } = await api("/api/models");
+                const st = await api("/api/status");
+                const names = models.map((m) => m.name);
+                if (st.llama.alias && !names.includes(st.llama.alias)) names.unshift(st.llama.alias);
+                $("chatModel").innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+                if (st.llama.alias) $("chatModel").value = st.llama.alias;
+            } catch (e) { toast(e.message); }
+        }
+        function chatFor(name) {
+            document.querySelector('.nav[data-view="chat"]').click();
+            $("chatModel").value = name;
+        }
+        async function chatSend() {
+            const body = {
+                model: $("chatModel").value, format: $("chatFormat").value,
+                stream: $("chatStream").checked, prompt: $("chatPrompt").value,
+                max_tokens: Number($("chatMax").value) || 128,
+                temperature: Number($("chatTemp").value),
+            };
+            $("chatNote").textContent = "running…";
+            $("ckStatus").textContent = "…";
+            await withBusy("running " + body.format + " test — may take minutes on CPU", async () => {
+                try {
+                    const r = await api("/api/chat/test", { method: "POST", body: JSON.stringify(body) });
+                    const run = r.run || {};
+                    $("ckStatus").textContent = run.status;
+                    $("ckStatus").className = run.status === "ok" ? "pass" : "fail";
+                    $("ckMs").textContent = (run.latency_ms || 0) + " ms";
+                    $("ckTtft").textContent = run.ttft_ms != null ? run.ttft_ms + " ms" : "—";
+                    $("ckTok").textContent = run.total_tokens != null ? run.total_tokens : "—";
+                    $("chatOut").textContent = r.ok
+                        ? (r.text || "(empty)") + `\n\n— ${run.format} · ${run.finish_reason || ""} · prompt ${run.prompt_tokens ?? "?"} / completion ${run.completion_tokens ?? "?"}`
+                        : "FAIL: " + (run.error || "unknown error");
+                    $("chatNote").textContent = "stored in chat_runs";
+                    await loadChatRuns();
+                } catch (e) {
+                    $("chatOut").textContent = "FAIL: " + e.message;
+                    $("chatNote").textContent = "request failed";
+                }
+            });
+        }
+        async function loadChatRuns() {
+            try {
+                const { runs } = await api("/api/chat/runs?limit=20");
+                $("chatRunRows").innerHTML = runs.map((r) =>
+                    `<tr><td style="color:var(--muted)">${esc((r.created_at || "").slice(11, 19))}</td><td>${esc(r.model)}</td>` +
+                    `<td>${esc(r.format)}${r.stream ? " · stream" : ""}</td><td class="${r.status === "ok" ? "pass" : "fail"}">${esc(r.status)}</td>` +
+                    `<td>${r.latency_ms}</td><td>${r.total_tokens ?? "—"}</td></tr>`
+                ).join("") || `<tr><td colspan="6" style="color:var(--muted)">no runs yet</td></tr>`;
+            } catch (e) { toast(e.message); }
+        }
+
+        /* ------------------------------------------------------------ prompts */
+        let promptCtx = { id: null, version: 0 };
+
+        async function loadPrompts() {
+            try {
+                const r = await api("/api/prompts");
+                const prompts = r.prompts || [];
+                $("promptRows").innerHTML = prompts.map((p) =>
+                    `<tr><td><b style="color:var(--white)">${esc(p.name)}</b><br><span class="hint">${esc(p.slug)}</span></td>` +
+                    `<td>v${p.current_version} <span class="hint">(${p.versions_count})</span></td>` +
+                    `<td><span class="badge">${esc(p.scope)}</span></td>` +
+                    `<td>${p.is_default ? '<span class="badge ok">default</span>' : ""}</td>` +
+                    `<td>${p.bindings.map((b) => `<span class="badge">${esc(b.target_type)}${b.target_id ? ":" + esc(b.target_id) : ""}</span>`).join(" ") || "—"}</td>` +
+                    `<td style="color:var(--muted)">${esc((p.updated_at || "").slice(0, 16).replace("T", " "))}</td>` +
+                    `<td><div class="row" style="gap:6px;flex-wrap:wrap">` +
+                    `<button class="ghost" onclick="openPromptModal(${p.id})">edit</button>` +
+                    `<button class="ghost" onclick="testPromptById(${p.id})">test</button>` +
+                    `<button class="ghost" onclick="setDefaultPrompt(${p.id})" ${p.is_default ? "disabled" : ""}>default</button>` +
+                    `</div></td></tr>`
+                ).join("") || `<tr><td colspan="7" style="color:var(--muted)">no prompts yet — press New prompt</td></tr>`;
+
+                const resolved = r.resolved;
+                $("promptResolved").textContent = resolved
+                    ? `# ${resolved.name} (${resolved.slug}) · v${resolved.version}${resolved.version_id ? " · version_id " + resolved.version_id : ""}\n\n${resolved.content || ""}`
+                    : "no prompt resolved — the engine chat template default is used";
+            } catch (e) {
+                $("promptRows").innerHTML = `<tr><td colspan="7" class="fail">${esc(e.message)}</td></tr>`;
+            }
+        }
+
+        async function fillPromptModels(selected) {
+            try {
+                const { models } = await api("/api/models");
+                const st = await api("/api/status");
+                const names = (models || []).map((m) => m.name);
+                if (st.llama.alias && !names.includes(st.llama.alias)) names.unshift(st.llama.alias);
+                $("pmModel").innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
+                    || `<option value="">no model — load one first</option>`;
+                if (selected && names.includes(selected)) $("pmModel").value = selected;
+                else if (st.llama.alias) $("pmModel").value = st.llama.alias;
+            } catch (e) {
+                $("pmModel").innerHTML = `<option value="">models unavailable</option>`;
+            }
+        }
+
+        async function openPromptModal(id) {
+            promptCtx = { id: id || null, version: 0 };
+            $("promptModalTitle").textContent = id ? "Edit system prompt" : "New system prompt";
+            $("pmName").value = "";
+            $("pmScope").value = "global";
+            $("pmTags").value = "";
+            $("pmContent").value = "";
+            $("pmNote").value = "";
+            $("pmPrompt").value = "Reply with OK in one short sentence.";
+            $("pmMax").value = "48";
+            $("pmResult").className = "resultbox";
+            $("pmResult").textContent = "not tested yet";
+            $("pmVersionNote").innerHTML = "new prompt — <b>v1</b> is written on save";
+            $("pmName").disabled = false;
+            await fillPromptModels();
+            openModalWrap("promptModalWrap", id ? "pmContent" : "pmName");
+            if (!id) return;
+            try {
+                const p = await api(`/api/prompts/${id}`);
+                promptCtx.version = p.current_version;
+                $("pmName").value = p.name || "";
+                $("pmName").disabled = true;
+                $("pmScope").value = p.scope || "global";
+                $("pmTags").value = (p.tags || []).join(",");
+                $("pmContent").value = p.content || "";
+                $("pmVersionNote").innerHTML = `editing <b>${esc(p.name)}</b> — save appends <b>v${p.current_version + 1}</b> (v${p.current_version} stays in history)`;
+            } catch (e) {
+                $("pmResult").className = "resultbox fail";
+                $("pmResult").textContent = "load failed: " + e.message;
+            }
+        }
+
+        function closePromptModal() { closeModalWrap("promptModalWrap"); }
+
+        async function promptTestPayload() {
+            const content = $("pmContent").value;
+            if (!content.trim()) throw new Error("content is empty");
+            return {
+                model: $("pmModel").value,
+                format: "openai",
+                prompt: $("pmPrompt").value || "Reply with OK in one short sentence.",
+                system: content,
+                max_tokens: Number($("pmMax").value) || 48,
+                temperature: 0.2,
+                prompt_version_id: promptCtx.id ? null : undefined,
+            };
+        }
+
+        async function testPromptModal(btn) {
+            const out = $("pmResult");
+            out.className = "resultbox";
+            out.textContent = "calling the model… (CPU can take a while)";
+            if (btn) btn.disabled = true;
+            try {
+                const body = await promptTestPayload();
+                delete body.prompt_version_id;
+                const r = await api("/api/chat/test", { method: "POST", body: JSON.stringify(body) });
+                const run = r.run || {};
+                out.className = "resultbox " + (r.ok ? "pass" : "fail");
+                out.textContent = `${r.ok ? "PASS" : "FAIL"} · ${run.latency_ms || 0}ms · finish=${run.finish_reason || "—"} · tokens ${run.total_tokens ?? "—"}\n\n${r.ok ? (r.text || "(empty)") : (run.error || "unknown error")}`;
+            } catch (e) {
+                out.className = "resultbox fail";
+                out.textContent = "FAIL · " + e.message;
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function savePromptModal(btn, doTest) {
+            const content = $("pmContent").value;
+            if (!content.trim()) return toast("content is required");
+            const name = $("pmName").value.trim();
+            if (!promptCtx.id && !name) return toast("name is required");
+            const out = $("pmResult");
+            out.className = "resultbox";
+            out.textContent = "saving…";
+            if (btn) btn.disabled = true;
+            try {
+                let saved;
+                if (promptCtx.id) {
+                    saved = await api(`/api/prompts/${promptCtx.id}/versions`, {
+                        method: "POST",
+                        body: JSON.stringify({ content, note: $("pmNote").value }),
+                    });
+                    promptCtx.version = saved.current_version;
+                    $("pmVersionNote").innerHTML = `saved <b>v${saved.current_version}</b> of ${esc(saved.slug)}`;
+                } else {
+                    const tags = $("pmTags").value.split(",").map((s) => s.trim()).filter(Boolean);
+                    saved = await api("/api/prompts", {
+                        method: "POST",
+                        body: JSON.stringify({ name, content, scope: $("pmScope").value, tags, note: $("pmNote").value }),
+                    });
+                    promptCtx = { id: saved.id, version: saved.current_version };
+                    $("pmName").disabled = true;
+                    $("pmVersionNote").innerHTML = `created <b>${esc(saved.slug)} v${saved.current_version}</b>`;
+                }
+                await loadPrompts();
+                toast(`prompt saved · v${saved.current_version}`);
+                if (!doTest) {
+                    out.className = "resultbox pass";
+                    out.textContent = `saved ${saved.slug} v${saved.current_version} — press Test to verify the model with it`;
+                    return;
+                }
+                const body = {
+                    model: $("pmModel").value,
+                    format: "openai",
+                    prompt: $("pmPrompt").value || "Reply with OK in one short sentence.",
+                    system: content,
+                    max_tokens: Number($("pmMax").value) || 48,
+                    temperature: 0.2,
+                    prompt_version_id: saved.current_version_id ?? null,
+                };
+                out.className = "resultbox";
+                out.textContent = `saved v${saved.current_version} · calling the model… (CPU can take a while)`;
+                const r = await api("/api/chat/test", { method: "POST", body: JSON.stringify(body) });
+                const run = r.run || {};
+                out.className = "resultbox " + (r.ok ? "pass" : "fail");
+                out.textContent = `saved v${saved.current_version} · ${r.ok ? "model PASS" : "model FAIL"} · ${run.latency_ms || 0}ms · finish=${run.finish_reason || "—"}\n\n${r.ok ? (r.text || "(empty)") : (run.error || "unknown error")}`;
+            } catch (e) {
+                out.className = "resultbox fail";
+                out.textContent = "not saved · " + e.message;
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function testPromptById(id) {
+            await withBusy("testing prompt against the model — CPU can take a while", async () => {
+                try {
+                    const p = await api(`/api/prompts/${id}`);
+                    const body = {
+                        model: $("pmModel").value || undefined,
+                        format: "openai",
+                        prompt: "Reply with OK in one short sentence.",
+                        system: p.content || "",
+                        max_tokens: 48,
+                        temperature: 0.2,
+                        prompt_version_id: p.current_version_id ?? null,
+                    };
+                    const r = await api("/api/chat/test", { method: "POST", body: JSON.stringify(body) });
+                    const run = r.run || {};
+                    toast(`${r.ok ? "PASS" : "FAIL"} · ${p.slug} v${p.current_version} · ${run.latency_ms || 0}ms`);
+                } catch (e) { toast("test failed · " + e.message); }
+            });
+            await loadPrompts();
+        }
+
+        async function setDefaultPrompt(id) {
+            try {
+                const r = await api(`/api/prompts/${id}/default`, { method: "POST", body: "{}" });
+                toast(`${r.slug} is now the default prompt`);
+            } catch (e) { toast(e.message); }
+            await loadPrompts();
+        }
+
+        async function refresh() {
+            try {
+                const s = await api("/api/status");
+                const ok = s.llama.health === "ok";
+                loaded = s.llama.active;
+                const pill = $("statePill");
+                pill.className = "pill " + (ok ? "ok" : loaded ? "warn" : "bad");
+                pill.textContent = ok ? "healthy" : loaded ? "loading" : "down";
+                $("stateText").textContent = ok ? "llama server running" : loaded ? "llama server starting…" : "llama server stopped";
+                $("stateModel").textContent = s.llama.alias ? s.llama.alias + " · " + s.llama.base_url : "";
+                $("expires").textContent = s.llama.expires_at ? "auto-unload " + new Date(s.llama.expires_at).toLocaleTimeString() : "";
+                $("btnUnload").disabled = !loaded;
+                const ePill = $("pillEngine");
+                ePill.className = "pill " + (ok ? "ok" : "bad");
+                ePill.textContent = "engine: " + s.llama.health;
+                $("pillTls").textContent = s.llama.tls ? "TLS on" : "TLS off";
+                $("pillTls").className = "pill " + (s.llama.tls ? "ok" : "");
+                $("pillUds").textContent = s.llama.uds ? "UDS on" : "UDS off";
+                $("pillUds").className = "pill " + (s.llama.uds ? "ok" : "");
+                $("mcpConfig").textContent = s.llama.mcp_config || "not configured — engine serves native tool calling via chat template only";
+
+                const r = await api("/api/models");
+                gatewayState = r.gateway || gatewayState;
+                await refreshRuntime();
+                renderModels(r.models || []);
+
+                const met = await api("/api/metrics");
+                $("kReq").textContent = met.totals.requests;
+                $("kErr").textContent = met.totals.errors;
+                $("kAvg").textContent = met.totals.requests ? Math.round(met.totals.ms / met.totals.requests) + " ms" : "–";
+                $("kMax").textContent = met.totals.max_ms ? met.totals.max_ms + " ms" : "–";
+                $("kBytes").textContent = mb(met.totals.bytes);
+                if ($("view-metrics").classList.contains("active")) await refreshMetrics();
+            } catch (e) { toast(e.message); }
+        }
+
+        /* ---------------------------------------------------------- modal helpers */
+        function openModalWrap(id, focusId) {
+            const w = $(id);
+            if (!w) return;
+            w.classList.add("open");
+            document.body.classList.add("modal-open");
+            setTimeout(() => { const el = focusId ? $(focusId) : null; if (el) el.focus(); }, 40);
+        }
+        function closeModalWrap(id) {
+            const w = $(id);
+            if (!w) return;
+            w.classList.remove("open");
+            if (!document.querySelector(".modalwrap.open") && $("modalWrap").style.display !== "flex") {
+                document.body.classList.remove("modal-open");
+            }
+        }
+        document.addEventListener("keydown", (e) => {
+            if (e.key !== "Escape") return;
+            if ($("mcpModalWrap").classList.contains("open")) return closeMcpModal();
+            if ($("promptModalWrap").classList.contains("open")) return closePromptModal();
+            if ($("modalWrap").style.display === "flex") return closeModal();
+        });
+        ["promptModalWrap", "mcpModalWrap"].forEach((id) => {
+            $(id).addEventListener("click", (e) => { if (e.target.id === id) closeModalWrap(id); });
+        });
+
+        function openModal(name) { pendingLoad = name; $("modalName").textContent = name; $("modalWrap").style.display = "flex"; }
+        function closeModal() { $("modalWrap").style.display = "none"; pendingLoad = null; }
+        $("modalWrap").onclick = (e) => { if (e.target.id === "modalWrap") closeModal(); };
+
+        async function loadConfirm() {
+            const ctx = Number($("mCtx").value) || undefined;
+            const ttl = Number($("mTtl").value) || 0;
+            const name = pendingLoad;
+            closeModal();
+            await withBusy("loading " + name + " — up to 3 min on this CPU", async () => {
+                try {
+                    const r = await api("/api/load", { method: "POST", body: JSON.stringify({ name, ctx, ttl_hours: ttl }) });
+                    toast("loaded " + r.alias + (ttl ? " · auto-unload in " + ttl + "h" : ""));
+                } catch (e) { toast(e.message); }
+            });
+        }
+        async function unload() {
+            await withBusy("unloading…", async () => {
+                try { const r = await api("/api/unload", { method: "POST", body: JSON.stringify({}) }); toast(r.was ? "unloaded " + r.was : "nothing was loaded"); }
+                catch (e) { toast(e.message); }
+            });
+        }
+        async function syncModels() {
+            await withBusy("syncing models…", async () => {
+                try {
+                    const r = await api("/api/sync", { method: "POST", body: JSON.stringify({}) });
+                    toast("synced " + r.count + " model(s)");
+                } catch (e) { toast(e.message); }
+            });
+        }
+        async function mapModel(name) {
+            await withBusy("mapping " + name + " into the gateway…", async () => {
+                try {
+                    const r = await api("/api/map", { method: "POST", body: JSON.stringify({ name }) });
+                    toast("mapped " + r.id + " · restart zombie-gateway.service to apply");
+                } catch (e) { toast(e.message); }
+            });
+        }
+        async function download() {
+            const repo = $("dlRepo").value.trim(), file = $("dlFile").value.trim();
+            if (!repo || !file) return toast("repo and file required");
+            $("dlResult").textContent = "downloading…";
+            await withBusy("downloading " + file + " …", async () => {
+                try {
+                    const r = await api("/api/download", { method: "POST", body: JSON.stringify({ repo, file }) });
+                    $("dlResult").textContent = r.cached ? "cached:true — already in catalog" : "saved " + mb(r.size);
+                    toast(r.cached ? "already downloaded before — served from catalog" : "download complete");
+                } catch (e) { $("dlResult").textContent = "error"; toast(e.message); }
+            });
+        }
+
+        /* ------------------------------------------------------- protocol tests */
+        const TESTS = {
+            http:      { label: "HTTP health",        route: "GET /health (plaintext)" },
+            https:     { label: "HTTPS (native TLS)", route: "GET /health (TLS)" },
+            uds:       { label: "UDS",                route: "GET unix:///…/llama.sock/health" },
+            openai:    { label: "OpenAI non-stream",  route: "POST /v1/chat/completions" },
+            stream:    { label: "OpenAI stream",      route: "POST /v1/chat/completions stream:true" },
+            anthropic: { label: "Anthropic Messages", route: "POST /v1/messages" },
+            tools:     { label: "Tool call",          route: "POST /v1/chat/completions + tools[]" },
+        };
+        let testState = {};
+
+        function renderTests() {
+            const kinds = Object.keys(TESTS);
+            const rows = kinds.filter((k) => testState[k]).map((k) => {
+                const t = testState[k];
+                const cls = t.ok ? "pass" : t.skip ? "skip" : "fail";
+                const status = t.ok ? "PASS" : t.skip ? "SKIPPED" : "FAIL";
+                return `<tr><td><b style="color:var(--white)">${esc(TESTS[k].label)}</b></td>` +
+                    `<td><code>${esc(t.what || TESTS[k].route)}</code></td>` +
+                    `<td><span class="badge ${cls === "pass" ? "ok" : cls === "fail" ? "bad" : ""}">${status}</span></td>` +
+                    `<td>${t.ms != null ? t.ms + " ms" : "—"}</td>` +
+                    `<td style="color:var(--muted)">${esc(t.detail || "")}${t.finish ? " · finish=" + esc(t.finish) : ""}${t.tool ? " · tool=" + esc(t.tool) : ""}</td>` +
+                    `<td style="color:var(--muted)">${esc((t.at || "").slice(11, 19))}</td></tr>`;
+            });
+            $("testResultRows").innerHTML = rows.join("") ||
+                `<tr><td colspan="6" style="color:var(--muted)">no tests run yet — pick a protocol above</td></tr>`;
+            document.querySelectorAll("[data-test]").forEach((b) => {
+                const t = testState[b.dataset.test];
+                b.classList.toggle("tested", Boolean(t));
+                b.style.borderColor = t ? (t.ok ? "var(--green)" : t.skip ? "var(--amber)" : "var(--red)") : "";
+            });
+        }
+
+        async function runTest(kind, btn) {
+            const meta = TESTS[kind] || { label: kind, route: "" };
+            const out = $("testOut");
+            if (out.textContent === "no tests run yet") out.textContent = "";
+            out.textContent += `▶ ${kind} …\n`;
+            out.scrollTop = out.scrollHeight;
+            if (btn) btn.disabled = true;
+            await withBusy("running " + meta.label + " test…", async () => {
+                try {
+                    const r = await api("/api/test", { method: "POST", body: JSON.stringify({ kind }) });
+                    const skip = !r.ok && String(r.detail || "").startsWith("skipped");
+                    testState[kind] = { ...r, skip, at: new Date().toISOString() };
+                    const cls = r.ok ? "pass" : skip ? "skip" : "fail";
+                    out.innerHTML += `&lt;<span class="${cls}">${r.ok ? "PASS" : skip ? "SKIPPED" : "FAIL"}</span>&gt; [${esc(kind)}] ${r.ms}ms — ${esc(r.what || r.detail || "")}${r.finish ? " finish=" + esc(r.finish) : ""}${r.tool ? " tool=" + esc(r.tool) + "(" + esc(r.args || "") + ")" : ""}\n`;
+                } catch (e) {
+                    testState[kind] = { ok: false, ms: null, detail: e.message, at: new Date().toISOString() };
+                    out.innerHTML += `&lt;<span class="fail">FAIL</span>&gt; [${esc(kind)}] ${esc(e.message)}\n`;
+                }
+                out.scrollTop = out.scrollHeight;
+                renderTests();
+            });
+            if (btn) btn.disabled = false;
+        }
+
+        function clearTests() {
+            testState = {};
+            $("testOut").textContent = "no tests run yet";
+            renderTests();
+        }
+
+        async function runPreflight() {
+            const list = $("preflightList");
+            list.innerHTML = `<li><span class="tag" style="color:var(--muted)">…</span><span class="name">running</span><span class="detail">probing engine (can take a minute on CPU)</span></li>`;
+            await withBusy("preflight — checking OS, engine, models, responses", async () => {
+                try {
+                    const r = await api("/api/preflight");
+                    list.innerHTML = r.checks.map((c) => {
+                        const tag = c.ok ? `<span class="tag pass">PASS</span>` : c.skip ? `<span class="tag skip">SKIP</span>` : `<span class="tag fail">FAIL</span>`;
+                        return `<li>${tag}<span class="name">${esc(c.check)}</span><span class="detail">${esc(c.detail || "")}${c.ms ? " · " + c.ms + "ms" : ""}</span></li>`;
+                    }).join("");
+                    toast(r.ok ? "preflight: all checks passed" : "preflight: some checks failed");
+                } catch (e) {
+                    list.innerHTML = `<li><span class="tag fail">FAIL</span><span class="name">preflight</span><span class="detail">${esc(e.message)}</span></li>`;
+                }
+            });
+        }
+
+        async function loadLogs() {
+            const n = Number($("logN").value) || 50;
+            const { lines } = await api(`/api/logs?n=${n}`);
+            const rows = $("onlyReq").checked ? lines.filter((l) => l.includes('"kind":"request"')) : lines;
+            $("logOut").textContent = rows.map((x) => {
+                try {
+                    const o = JSON.parse(x);
+                    let s = o.ts.slice(11, 19) + "  " + o.kind + (o.action ? "/" + o.action : "");
+                    if (o.path) s += `  ${o.method} ${o.path} → ${o.status} ${o.ms}ms (${o.model || ""})`;
+                    if (o.alias) s += "  " + o.alias;
+                    if (o.kind === "test") s += `  ${o.ok ? "PASS" : (String(o.detail || "").startsWith("skipped") ? "SKIPPED" : "FAIL")} ${o.detail || o.what || ""}`;
+                    if (o.kind === "download") s += `  ${o.repo || ""}/${o.file || ""} ${o.size ? mb(o.size) : ""}`;
+                    if (o.detail) s += "  " + o.detail;
+                    return s;
+                } catch { return x; }
+            }).join("\n") || "no log lines";
+        }
+        async function loadEngineLogs() {
+            const r = await api("/api/engine-logs?n=80");
+            $("engineFile").textContent = r.file ? r.file : "no engine log yet";
+            $("engineOut").textContent = r.lines.join("\n") || "no engine log lines yet — load a model";
+        }
+
+        renderTests();
+        refresh();
+        setInterval(refresh, 5000);
+        setInterval(refreshRuntime, 3000);
+    </script>
+</body>
+
+</html>
