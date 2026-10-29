@@ -535,6 +535,14 @@ export class EngineManager {
         await sleep(3000);
         continue;
       }
+      // The admin API and the CLI each spawn their own engine. If one of them
+      // already answers on the port, this supervisor stands down: deleting the
+      // "stale" socket would unlink the live engine's unix listener.
+      const health = await this.health().catch(() => null);
+      if (health?.ok) {
+        await sleep(3000);
+        continue;
+      }
       const model = this.store.getModel(state.model_id);
       if (!model || !model.path) {
         process.stderr.write(`engine-run: model ${state.model_id} has no file path; idle\n`);

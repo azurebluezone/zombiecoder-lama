@@ -77,6 +77,12 @@ LAMA_DEFAULT_TTL_HOURS=${cfg.defaultTtlHours}
 }
 
 async function main(): Promise<void> {
+  // `node src/main.ts doctor | head -3` closes the pipe early; without this the
+  // process dies with an EPIPE stack trace instead of a clean exit.
+  process.stdout.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") process.exit(0);
+    throw error;
+  });
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === "--help" || command === "-h") {
     usage();

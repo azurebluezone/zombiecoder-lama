@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { ensureTls, tlsSupport } from "../src/installer.ts";
+import { ensureTls, relinkLocalSymlinks, shipsAssets, tlsSupport } from "../src/installer.ts";
 import { buildEngineArgs, resolveBinary } from "../src/engine.ts";
-import { testConfig } from "./helpers.ts";
+import { testConfig, testOs } from "./helpers.ts";
 
 const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
 
@@ -138,4 +138,34 @@ test("tlsSupport reports static binaries as undetermined instead of guessing", (
   });
   assert.equal(result.supported, null);
   assert.match(result.detail, /not a dynamic executable/);
+});
+
+test("shipsAssets skips a release that is still uploading and names the gap", () => {
+  const os = testOs();
+  // b11985 on GitHub had only the cudart companions — no CPU tarball yet.
+  assert.equal(shipsAssets("b11985", ["cudart-llama-b11985-bin-ubuntu-cuda-13.4-x64.tar.gz"], os, "cpu"), false);
+  assert.equal(shipsAssets("b11982", ["llama-b11982-bin-ubuntu-x64.tar.gz"], os, "cpu"), true);
+  assert.equal(
+    shipsAssets("b11982", ["llama-b11982-bin-ubuntu-cuda-13.4-x64.tar.gz"], os, "cuda"),
+    false,
+    "cuda must refuse without its cudart companion",
+  );
+  assert.equal(shipsAssets("b11982", ["llama-b11982-bin-macos-x64.tar.gz"], os, "cpu"), false, "wrong platform asset is not a match");
+});
+
+test("relinkLocalSymlinks repairs the absolute links fs.cpSync leaves behind", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lama-symlink-"));
+  const temp = path.join(root, "temp", "llama-b0");
+  const installDir = path.join(root, "bin", "llama", "b0");
+  fs.mkdirSync(temp, { recursive: true });
+  fs.writeFileSync(path.join(temp, "libllama-common.so.0.8.0"), "elf");
+  fs.symlinkSync("libllama-common.so.0.8.0", path.join(temp, "libllama-common.so.0")); // as the archive ships it
+  fs.cpSync(temp, installDir, { recursive: true });
+  fs.rmSync(path.join(root, "temp"), { recursive: true, force: true }); // install cleans its staging dir
+  const link = path.join(installDir, "libllama-common.so.0");
+  assert.equal(path.isAbsolute(fs.readlinkSync(link)), true, "cpSync absolutized the link");
+  assert.equal(fs.existsSync(link), false, "and it dangles once the temp dir is gone");
+  assert.equal(relinkLocalSymlinks(installDir), 1);
+  assert.equal(fs.readlinkSync(link), "libllama-common.so.0.8.0");
+  assert.equal(fs.existsSync(link), true);
 });
