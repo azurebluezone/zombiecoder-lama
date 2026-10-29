@@ -11,7 +11,9 @@ state in SQLite and exposes one authenticated admin API/UI.
 
 ```bash
 npm run setup                 # create dirs + .env, generate LAMA_ADMIN_TOKEN
-npm run install:llama         # download the stock release for this OS/arch/accel
+npm run install:llama         # official upstream installer (llama.app/install.sh) -> ~/.local/bin/llama
+npm run install:all           # one-shot: deps, engine, model, seeds, TLS, both units, model load
+npm run build:dist            # self-contained dist/ tarball (no runtime dependencies)
 npm run doctor                # binary, TLS linkage, engine state, DB counts
 npm start                     # admin API + UI on http://127.0.0.1:9933
 npm run check                 # tsc --noEmit + node --test
@@ -55,6 +57,9 @@ Markdown download.
 
 - **One model at a time.** `engine_state` in SQLite is the lock; `data/engine.lock` prevents two
   supervisors. TTL is stored per load and enforced by a 30s loop in the admin process.
+- **One spawner, ever.** An explicit `LAMA_SERVICE_MODE` wins; a stale value defers to a running
+  systemd unit, `stop()` never unlinks a UDS socket that still answers `/health`, and `start()`
+  adopts an already-healthy engine instead of spawning a duplicate that cannot bind.
 - **Reload is a restart.** mmap and load flags are fixed at process start, so a reload stops and
   starts the engine (via systemd when service mode is `user`/`system`, otherwise a direct spawn).
 - **mmap is proven, not assumed.** `/proc/<pid>/maps` is parsed for the model file; the UI shows
@@ -105,7 +110,7 @@ Markdown download.
 
 ## Verification
 
-`npm run check` runs 56 tests: parser stages, release asset mapping, SQLite seed/versioning and
+`npm run check` runs 58 tests: parser stages, release asset mapping, SQLite seed/versioning and
 migration v3 (`request_logs`, `tool_usage`, `mcp_tools`), request/tool aggregates, generated docs
 (HTTP, UDS, Markdown, no token leak), the integration guide (four languages × five scenarios, UDS,
 install order, token absence), prompt file/DB sync, SSE auth plus `hello`/`audit` frames,

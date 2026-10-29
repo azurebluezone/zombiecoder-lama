@@ -7,7 +7,7 @@ and never re-implements the engine.
 ```
 control plane   :9933  admin API + UI (writes, auth, identity headers, optional /v1 proxy)
 data plane      :9931  stock llama.cpp (OpenAI + Anthropic surfaces)
-unix socket     /tmp/llama-1000/llama.sock   dir 0700, socket 0660
+unix socket     /tmp/llama-<uid>/llama.sock   dir 0700, socket 0660
 registry        data/manager.db              SQLite (WAL), migrations in lama_manager_migrations
 identity        identity.json                SSI-Core manifest, mode 0444
 seeds           db/seed/lama.json            declarative rows, applied on boot
@@ -57,9 +57,12 @@ npm install
 npm run install:llama
 ```
 
-This fetches the official llama.cpp release for your OS/arch, verifies its checksum and links the
-binary at `bin/llama-server` inside the project — no `PATH` edit needed. On an NVIDIA box add
-`-- --accel cuda` (or `vulkan`) to the same command.
+This runs the official upstream installer (`https://llama.app/install.sh`): the script is fetched
+to `data/install/llama-install.sh` first so its exact bytes can be audited, then executed with
+`sh`. Upstream installs one unified binary at `~/.local/bin/llama` — already on your `PATH` from
+step 2 — and no second copy is kept inside the project. If that binary already exists the step
+reuses it. To pin a specific release instead, run `npm run install:llama -- --build b11941`
+(that path also accepts `--accel cuda`/`vulkan` for GPU builds).
 
 ### 5. Create the config, token and database
 
@@ -123,6 +126,29 @@ cd "$HOME/lama" && git pull && npm install && npm run check \
   && systemctl --user restart lama-admin lama-engine
 ```
 
+## One-shot installer
+
+```bash
+npm run install:all
+```
+
+`scripts/install.mjs` runs the whole copy-paste guide above as checked steps — Node version, dev
+dependencies, engine, model file, `.env`/database/seeds, TLS check, both systemd units, the newest
+model load and the admin URL in the browser. Every step prints `[ok]` or `[fail]` with its raw
+output; a step the platform cannot do is skipped (never hung), and the script exits non-zero if
+anything failed. Live on this machine: `9/9 steps ok`, exit `0`.
+
+## Distributable build
+
+```bash
+npm run build:dist
+```
+
+`scripts/build-dist.mjs` compiles `src/` with `tsconfig.build.json` into `dist/` and packs
+`lama-dist-<version>.tgz`. The artifact runs on any machine with Node 24 alone —
+`dist/package.json` declares `dependencies: none` — and the engine binary still comes from the
+official installer on first run.
+
 ## Headless by design
 
 `web/` is only static files (`index.html`, `app.js`, `style.css`) and the UI keeps no business logic.
@@ -135,8 +161,10 @@ no demo rows.
 
 ## What it does
 
-- **Stock binary, no fork.** `llama install` resolves the official release asset for the detected
-  OS/arch/accel and verifies the extracted binary. Nothing patches llama.cpp.
+- **Stock binary, no fork.** The default install path is the official upstream installer
+  (`llama.app/install.sh`), fetched to a file first so its bytes are audited before `sh` runs it;
+  `--build bNNNNN` pins a specific GitHub release instead (Windows uses that path too). Nothing
+  patches llama.cpp, and the binary stays where upstream put it: `~/.local/bin/llama`.
 - **One model at a time.** `engine_state` in SQLite is the lock, `data/engine.lock` stops two
   supervisors. `ttl_hours` is stored per load and enforced by a 30s loop in the admin process
   (verified: a 36s TTL unloaded the model on the next tick, port closed, socket removed).
@@ -264,7 +292,7 @@ The gateway is a separate application and is not modified here.
   plane dependency.
 - **If `LAMA_ENGINE_API_KEY` is set**, register that env var in the gateway as `api_key_env`.
 - **UDS:** symlink the engine socket into the gateway folder (`web` → *Link socket*, or
-  `ln -s /tmp/llama-1000/llama.sock <gateway>/llama.sock`). Never pass the socket path to llama.cpp
+  `ln -s /tmp/llama-<uid>/llama.sock <gateway>/llama.sock`). Never pass the socket path to llama.cpp
   as an environment variable.
 - Engine restarts do not require a gateway restart; re-sync only the provider.
 
@@ -299,7 +327,7 @@ does it on demand.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node --test test/*.test.ts  → 56 tests
+npm test            # node --test test/*.test.ts  → 58 tests
 ```
 
 Covered: portable config derivation, parser stages, release asset mapping, SQLite seed/migrations/legacy guard (incl.
@@ -316,7 +344,7 @@ Live on this machine (build `11941`, `0.7.0-dev`):
 | `GET /healthz`, `/`, `/api/state` | `200`, `200`, `200` with token / `401` without |
 | `GET /v1/models`, `/props`, `/slots`, `/metrics`, `/tools` | `200` |
 | `POST /v1/chat/completions`, `/v1/messages` (engine, manager, UDS, gateway) | `200` with content |
-| UDS `curl --unix-socket /tmp/llama-1000/llama.sock` | `200` |
+| UDS `curl --unix-socket /tmp/llama-<uid>/llama.sock` | `200` |
 | mmap proof | `mapped: true`, `r--s`, model present in `/proc/<pid>/maps` |
 | TTL expiry (0.01h) | unloaded by the loop, port `9931` closed, socket removed |
 | admin stopped | engine `200`, gateway chat `200` |
@@ -324,6 +352,9 @@ Live on this machine (build `11941`, `0.7.0-dev`):
 | OpenAI + Anthropic, HTTP + UDS, stream + buffered | `200`; OpenAI `data: [DONE]`, Anthropic named events |
 | `/api/chat` with `system_prompt_id=system` | prompt tokens `30` → `935`, `done` frame carries duration/first-token/usage |
 | request log / stats | 63 rows recorded, `0` failed, grouped per model + transport |
+| `node scripts/install.mjs` (rerun) | `9/9 steps ok`, exit `0` |
+| `npm run build:dist` | exit `0`; `dist/package.json` → `dependencies: none`, `lama-dist-0.1.0.tgz` 9.7 MiB |
+| `POST /v1/chat/completions` over HTTP, UDS **and** admin proxy | `200` on all three; proxy replies as SSE with `done` (first token `326 ms`) |
 
 ## Not tested here
 
@@ -341,7 +372,8 @@ db/seed/        declarative seed rows
 test/           node:test suites
 docs/           current + legacy documentation
 server/         legacy zero-dependency JS manager (reference only)
-scripts/, templates/  legacy helper scripts referenced by the legacy docs
+scripts/         install.mjs (one-shot installer), build-dist.mjs (dist build), gen-cert/lamactl/setup + templates/ (legacy)
+dist/            build output of `npm run build:dist` (gitignored)
 identity.json   SSI-Core manifest
 data/           SQLite + runtime state (gitignored)
 models/         GGUF files (gitignored)

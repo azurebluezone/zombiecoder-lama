@@ -173,7 +173,7 @@ const OFFICIAL_INSTALLER = "https://llama.app/install.sh";
  * runs). The script is fetched to a file first so the exact bytes that will
  * execute are auditable, then run with `sh`. Upstream installs one unified
  * `llama` binary at ~/.local/bin/llama on Linux, macOS and FreeBSD and keeps
- * that layout as the source of truth; we only add the project's bin/ link.
+ * that layout as the source of truth; no second copy is kept inside the project.
  */
 export function installViaOfficialScript(cfg: Config, os: OsInfo, onLog?: (line: string) => void): InstallResult {
   const log = onLog ?? ((line: string) => process.stderr.write(`${line}\n`));
