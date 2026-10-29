@@ -43,11 +43,13 @@ what systemd requires.
 except `GET /` (404): `/api/*`, `/v1/*`, `/health`, `/tools` and the engine keep working. The UI calls
 that same API for every action, so the manager can be driven by curl or another program.
 
-The UI itself is ten views (Overview, Logs, Model List, Playground, Runtime, Transports & Docs, MCP
-Servers, Prompts, Tool Parser, Connection & Auth). Logs is fed by `GET /api/events`, an SSE stream
-that carries audit, request, engine, metrics, MCP and tool frames; polling `/api/state` remains a
-complete fallback. Chat streams from `POST /api/chat` and parses named events (`start`, `delta`,
-`reasoning`, `tool`, `usage`, `done`, `error`).
+The UI itself is eleven views (Overview, Logs, Model List, Model Playground, Runtime, Transports &
+Docs, MCP Servers, Prompts, Tool Parser, Docs, Connection & Auth). Logs is fed by `GET /api/events`,
+an SSE stream that carries audit, request, engine, metrics, MCP and tool frames; polling
+`/api/state` remains a complete fallback. Chat streams from `POST /api/chat` and parses named events
+(`start`, `delta`, `reasoning`, `tool`, `usage`, `done`, `error`). The Docs view renders
+`GET /api/docs/integration` with language tabs (curl, Node.js, Python, PHP), per-snippet copy and a
+Markdown download.
 
 ## Design
 
@@ -70,6 +72,11 @@ complete fallback. Chat streams from `POST /api/chat` and parses named events (`
   file* restores the repo copy. llama.cpp stores no prompt — every caller must send it.
 - **Docs are generated.** `/api/transports/:id/docs` and `.txt` build the connection, OpenAI,
   Anthropic, prompt, parser, error and SSE sections from the live endpoint and model alias.
+- **Integration docs are generated per caller.** `/api/docs/integration` and `.md` emit five
+  runnable scenarios (non-streaming, streaming, Anthropic Messages, tool calls with execution,
+  `run_shell`) in curl, Node.js, Python and PHP, the same four over the unix socket, and a six-step
+  Linux install walkthrough. Endpoints, socket and alias are filled from the live config; the admin
+  token is only ever read from `LAMA_ADMIN_TOKEN`, never embedded.
 
 ## Transport rules (gateway side)
 
@@ -98,9 +105,10 @@ complete fallback. Chat streams from `POST /api/chat` and parses named events (`
 
 ## Verification
 
-`npm run check` runs 52 tests: parser stages, release asset mapping, SQLite seed/versioning and
+`npm run check` runs 56 tests: parser stages, release asset mapping, SQLite seed/versioning and
 migration v3 (`request_logs`, `tool_usage`, `mcp_tools`), request/tool aggregates, generated docs
-(HTTP, UDS, Markdown, no token leak), prompt file/DB sync, SSE auth plus `hello`/`audit` frames,
+(HTTP, UDS, Markdown, no token leak), the integration guide (four languages × five scenarios, UDS,
+install order, token absence), prompt file/DB sync, SSE auth plus `hello`/`audit` frames,
 UDS request + symlink idempotency, MCP server `initialize`/`tools/list`, admin auth/CSP/route
 validation, engine proxy + identity headers, seed/identity/legacy-DB guard, TLS cert/key matching,
 binary resolution and engine argument construction.

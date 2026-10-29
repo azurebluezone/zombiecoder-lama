@@ -16,6 +16,7 @@ import { identityHeaders, loadIdentity } from "./identity.ts";
 import { EventHub } from "./realtime.ts";
 import { MetricsCollector } from "./metrics.ts";
 import { buildTransportDocs, docsToMarkdown } from "./docs.ts";
+import { buildIntegrationDocs, integrationToMarkdown } from "./integration.ts";
 import { PROMPT_USAGE, promptMeta, readPromptFile, resetSystemPrompt, saveSystemPrompt, syncSystemPrompt } from "./prompt.ts";
 
 interface Context {
@@ -1242,6 +1243,14 @@ export function createAdminServer(ctx: Context): http.Server {
         const result = linkSocket(transport.socket_path, cfg.gatewayDir);
         store.audit("transport.link_socket", transport.id, result.target, "admin");
         json(res, 200, result);
+        return;
+      }
+
+      const integrationRoute = /^\/api\/docs\/integration(\.md)?$/.exec(pathname);
+      if (method === "GET" && integrationRoute) {
+        const docs = buildIntegrationDocs(store, cfg, activeAlias(store));
+        if (integrationRoute[1]) return text(res, 200, integrationToMarkdown(docs), "text/markdown; charset=utf-8");
+        json(res, 200, docs);
         return;
       }
 

@@ -27,6 +27,8 @@ const state = {
   reconnectTimer: null,
   refreshTimer: null,
   chatAbort: null,
+  integration: null,
+  docsLang: "bash",
   liveNode: null,
   liveReason: null,
   liveReasonBox: null,
@@ -276,6 +278,7 @@ function renderView(name) {
     mcp: renderMcp,
     prompts: renderPrompts,
     tools: renderTools,
+    docs: renderDocsView,
     settings: renderSettings,
   };
   const render = renderers[name] || renderOverview;
@@ -1144,6 +1147,107 @@ function codeBlock(item) {
   return wrap;
 }
 
+/* ---------- docs (integration guide) ---------- */
+
+function renderDocsView() {
+  if (state.integration) paintIntegration();
+  void loadIntegration().catch((error) => toast(`docs: ${error.message}`, true));
+}
+
+async function loadIntegration() {
+  const docs = await api("/api/docs/integration");
+  state.integration = docs;
+  paintIntegration();
+}
+
+function paintIntegration() {
+  const docs = state.integration;
+  if (!docs) return;
+  setText("#docsStamp", `generated ${timeOnly(docs.generated_at)}`);
+  setText("#docsAlias", `model ${docs.model_alias}`);
+
+  const langs = $("#docsLangs");
+  langs.textContent = "";
+  const active = docs.languages.some((row) => row.id === state.docsLang) ? state.docsLang : docs.languages[0]?.id;
+  state.docsLang = active;
+  for (const row of docs.languages) {
+    const button = el("button", { class: `btn small${row.id === active ? " green active" : ""}`, text: row.label });
+    button.type = "button";
+    button.dataset.docsLang = row.id;
+    button.setAttribute("aria-pressed", String(row.id === active));
+    langs.append(button);
+  }
+
+  $("#docsInstallTitle").textContent = docs.install.title;
+  $("#docsInstallIntro").textContent = docs.install.intro;
+  const install = $("#docsInstall");
+  install.textContent = "";
+  for (const step of docs.install.steps) install.append(installStep(step));
+  if (docs.install.finish) install.append(el("p", { class: "doc-note", text: docs.install.finish }));
+
+  const box = $("#docsScenarios");
+  box.textContent = "";
+  for (const scenario of docs.scenarios) box.append(scenarioCard(scenario, active));
+
+  $("#docsUdsSummary").textContent = docs.uds.summary;
+  $("#docsUdsPath").textContent = docs.uds_path || "disabled";
+  const uds = $("#docsUds");
+  uds.textContent = "";
+  const udsExample = docs.uds.examples.find((row) => row.language === active);
+  if (udsExample) uds.append(docsExampleBlock(udsExample));
+}
+
+function installStep(step) {
+  const wrap = el("section", { class: "doc-section install-step" });
+  wrap.append(el("h3", { text: step.title }), el("p", { class: "doc-summary", text: step.body }));
+  if (step.code) {
+    const block = el("div", { class: "doc-code" });
+    const head = el("div", { class: "doc-code-head" });
+    const copy = el("button", { class: "btn small", text: "Copy" });
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(step.code, step.title));
+    head.append(el("span", { text: "bash" }), copy);
+    block.append(head, el("pre", { class: "code", text: step.code }));
+    wrap.append(block);
+  }
+  return wrap;
+}
+
+function scenarioCard(scenario, language) {
+  const panel = el("div", { class: "panel doc-scenario" });
+  const head = el("div", { class: "panel-head" });
+  head.append(
+    el(
+      "div",
+      {},
+      el("div", { class: "panel-title", text: scenario.title }),
+      el("div", { class: "panel-desc", text: scenario.summary }),
+    ),
+    tag(scenario.id),
+  );
+  const body = el("div", { class: "panel-body" });
+  if (scenario.notes.length) {
+    const notes = el("ul", { class: "doc-notes" });
+    for (const note of scenario.notes) notes.append(el("li", { text: note }));
+    body.append(notes);
+  }
+  const chosen = scenario.examples.find((row) => row.language === language) || scenario.examples[0];
+  if (chosen) body.append(docsExampleBlock(chosen));
+  panel.append(head, body);
+  return panel;
+}
+
+function docsExampleBlock(item) {
+  const block = el("div", { class: "doc-code" });
+  const head = el("div", { class: "doc-code-head" });
+  const copy = el("button", { class: "btn small", text: "Copy" });
+  copy.type = "button";
+  copy.addEventListener("click", () => copyText(item.code || "", `${item.label || item.language} snippet`));
+  head.append(el("span", { text: `${item.label || ""} · ${item.language}` }), copy);
+  block.append(head, el("pre", { class: "code", text: item.code || "" }));
+  return block;
+}
+
 /* ---------- MCP ---------- */
 
 function renderMcp() {
@@ -1902,6 +2006,22 @@ $("#tdDocsTxt").addEventListener("click", async () => {
   } catch (error) {
     toast(error.message, true);
   }
+});
+
+$("#docsRefresh").addEventListener("click", () => loadIntegration().then(() => toast("docs refreshed")).catch((error) => toast(error.message, true)));
+$("#docsDownload").addEventListener("click", async () => {
+  try {
+    const text = await fetchText("/api/docs/integration.md");
+    downloadText("lama-integration.md", text);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#docsLangs").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-docs-lang]");
+  if (!button) return;
+  state.docsLang = button.dataset.docsLang;
+  paintIntegration();
 });
 
 $("#mcpRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));

@@ -127,8 +127,8 @@ cd "$HOME/lama" && git pull && npm install && npm run check \
 Every button calls the same public API, so the manager is fully usable with the UI deleted, with
 curl, or from another program. Verified on this machine: with no `web/` content, `GET /` returns
 `404` while `GET /api/state`, `GET /v1/models`, `POST /v1/chat/completions` and `GET /tools` all
-return `200`. The UI has ten views — Overview, Logs (live audit/request/engine stream), Model List,
-Playground, Runtime, Transports & Docs, MCP Servers, Prompts, Tool Parser, Connection & Auth — and
+return `200`. The UI has eleven views — Overview, Logs (live audit/request/engine stream), Model List,
+Playground, Runtime, Transports, MCP Servers, Prompts, Tool Parser, Docs, Connection & Auth — and
 no demo rows.
 
 ## What it does
@@ -165,6 +165,12 @@ no demo rows.
 - **Docs are generated from the registry.** `GET /api/transports/:id/docs(.txt)` builds
   provider-style guides (connection, models/aliases, OpenAI, Anthropic, prompt, parser, errors,
   SSE) from the live endpoint and alias, so every curl block is copy-pasteable.
+- **There is a Docs menu for callers, not just for operators.** `GET /api/docs/integration(.md)`
+  builds five runnable scenarios — non-streaming, streaming, Anthropic Messages, tool calls
+  (ask + execute) and the allow-listed `run_shell` — in curl, Node.js, Python and PHP, plus the
+  same four over the unix socket and a six-step Linux install walkthrough. Every block is filled
+  with the live engine URL, admin URL, socket path and model alias; the admin token is always
+  read from `LAMA_ADMIN_TOKEN` and never rendered into the page or the Markdown export.
 
 ## CLI
 
@@ -236,7 +242,7 @@ LAMA_ADMIN_TOKEN=<generated>
 | --- | --- | --- |
 | UI | `GET /` (`/admin` → 302 `/`) | shell is public; the tab asks for the token |
 | admin API | `GET /api/state`, `/api/metrics`, `POST /api/engine/*`, `/api/models`, `/api/mcp`, `/api/prompts`, `/api/transports`, `/api/documents`, `/api/tools*`, `/api/audit` | `Authorization: Bearer <LAMA_ADMIN_TOKEN>` or `x-admin-token` |
-| live admin | `GET /api/events` (SSE), `GET /api/requests`, `/api/requests/stats`, `POST /api/chat`, `GET/PUT /api/system-prompt`, `POST /api/system-prompt/reset`, `GET /api/system-prompt.txt`, `GET /api/transports/:id/docs(.txt)` | same Bearer token |
+| live admin | `GET /api/events` (SSE), `GET /api/requests`, `/api/requests/stats`, `POST /api/chat`, `GET/PUT /api/system-prompt`, `POST /api/system-prompt/reset`, `GET /api/system-prompt.txt`, `GET /api/transports/:id/docs(.txt)`, `GET /api/docs/integration(.md)` | same Bearer token |
 | metrics | `GET /api/metrics` (`/proc` CPU/RAM/disk/engine RSS); recent audit + requests ride inside `/api/state` | same Bearer token |
 | proxied engine | `/v1/*`, `/health`, `/props`, `/slots`, `/metrics`, `/tools`, `/tokenize`, `/apply-template`, `/embedding*` | loopback, or `LAMA_API_KEY` off-loopback |
 | liveness | `GET /healthz` | public |
@@ -291,7 +297,7 @@ does it on demand.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node --test test/*.test.ts  → 52 tests
+npm test            # node --test test/*.test.ts  → 56 tests
 ```
 
 Covered: portable config derivation, parser stages, release asset mapping, SQLite seed/migrations/legacy guard (incl.

@@ -1242,3 +1242,14 @@ td .full{display:block;margin-top:5px;font-size:9px;color:#9fb0b7;overflow-wrap:
   .log-line{grid-template-columns:66px 62px minmax(0,1fr)}
   .chat-transcript{max-height:none}
 }
+
+/* ---------- docs view: language tabs, scenarios, install steps ---------- */
+#docsLangs{display:flex;gap:6px;flex-wrap:wrap}
+#docsLangs .btn.active{box-shadow:0 0 0 1px var(--green) inset}
+.doc-scenario{margin-bottom:12px}
+.doc-notes{margin:0 0 10px;padding-left:18px;color:#aab6bc;font-size:10px;line-height:1.65}
+.doc-notes li{margin-bottom:3px}
+.install-step{margin-bottom:14px}
+.install-step:last-of-type{margin-bottom:8px}
+#view-docs .doc-code .code{max-height:340px}
+#view-docs .docs{gap:12px}
