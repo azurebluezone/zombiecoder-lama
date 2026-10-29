@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import type { Config } from "./config.ts";
 import type { EngineState, MmapStatus, ModelRow, OsInfo, ToolCall } from "./types.ts";
 import type { Store } from "./db.ts";
-import { request } from "./transport.ts";
+import { request, requestUds } from "./transport.ts";
 import { serviceAction, servicePid } from "./service.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -322,8 +322,20 @@ export class EngineManager {
   }
 
   private serviceMode(): "none" | "user" | "system" {
+    // An explicit LAMA_SERVICE_MODE always wins (CLI/env is the operator's voice).
+    if (this.cfg.serviceMode !== "none") return this.cfg.serviceMode;
     const fromDb = this.store.setting("service_mode");
-    if (fromDb === "user" || fromDb === "system" || fromDb === "none") return fromDb;
+    if (fromDb === "user" || fromDb === "system") return fromDb;
+    if (fromDb === "none") {
+      // A stale "none" must not create a second spawner while a systemd unit is
+      // already running the engine: defer to the live unit (config drift guard).
+      if (servicePid(this.os, "user") || servicePid(this.os, "system")) {
+        return servicePid(this.os, "user") ? "user" : "system";
+      }
+      return "none";
+    }
+    if (servicePid(this.os, "user")) return "user";
+    if (servicePid(this.os, "system")) return "system";
     return this.cfg.serviceMode;
   }
 
@@ -372,6 +384,16 @@ export class EngineManager {
         const result = serviceAction(this.os, mode, "restart");
         if (!result.ok) throw new Error(`systemctl restart failed: ${result.detail}`);
       } else {
+        const pre = await this.health();
+        if (pre.ok) {
+          // Something already serves this port (a systemd unit or another
+          // spawner): adopt it instead of spawning a duplicate that cannot bind.
+          const adopted = servicePid(this.os, "user") ?? servicePid(this.os, "system");
+          this.store.setEngineState({ ...base, pid: adopted, status: "running" });
+          this.store.audit("engine.adopt", model.id, `pid=${adopted ?? "unknown"}`);
+          this.emit("running", model.id, "adopted an already healthy engine");
+          return this.status();
+        }
         const { command, args, logFile } = buildEngineArgs(this.cfg, model);
         fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
         const out = fs.openSync(logFile, "a", 0o600);
@@ -402,7 +424,15 @@ export class EngineManager {
             }
           }
           const state = this.store.engineState();
-          const pid = state.pid && isAlive(state.pid) ? state.pid : null;
+          const unitPid = servicePid(this.os, "user") ?? servicePid(this.os, "system");
+          // Health can come from a foreign process that owns the same port.
+          // Never report "running" while the engine we started is already dead.
+          if (state.pid && !isAlive(state.pid) && !unitPid) {
+            throw new Error(
+              `spawned engine exited immediately; /health is answered by another process on ${this.cfg.engineHost}:${this.cfg.enginePort}`,
+            );
+          }
+          const pid = state.pid && isAlive(state.pid) ? state.pid : unitPid;
           const running: Omit<EngineState, "updated_at" | "mmap"> = {
             ...base,
             pid,
@@ -453,6 +483,19 @@ export class EngineManager {
       }
     }
     if (this.cfg.udsPath) {
+      // Never unlink a socket that still answers: reload/stop from a second
+      // process used to delete a live engine's UDS and left it half-dead.
+      let socketLive = false;
+      try {
+        const probe = await requestUds(this.cfg.udsPath, "/health", { timeoutMs: 1500 });
+        socketLive = probe.status === 200;
+      } catch {
+        socketLive = false;
+      }
+      if (socketLive && !isAlive(pid)) {
+        // The serving process is unknown to this manager (e.g. a systemd unit).
+        return this.status();
+      }
       try {
         fs.rmSync(this.cfg.udsPath, { force: true });
       } catch {
@@ -551,7 +594,17 @@ export class EngineManager {
       }
       const { command, args } = buildEngineArgs(this.cfg, model);
       // A killed engine leaves its socket file behind; llama.cpp refuses to bind over it.
+      // Never unlink a socket that still answers: /health can time out while a busy
+      // engine evaluates a long prompt, and deleting its listener breaks UDS for
+      // everyone even though the process is alive.
       if (this.cfg.udsPath) {
+        const live = await requestUds(this.cfg.udsPath, "/health", { timeoutMs: 1500 })
+          .then((res) => res.status === 200)
+          .catch(() => false);
+        if (live) {
+          await sleep(3000);
+          continue;
+        }
         try {
           if (fs.existsSync(this.cfg.udsPath) && fs.statSync(this.cfg.udsPath).isSocket()) {
             fs.rmSync(this.cfg.udsPath, { force: true });
