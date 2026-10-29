@@ -73,12 +73,14 @@ Copy the value after `=`. That token is the only password; the file is `0600` an
 ### 6. Install the systemd user units and start the admin
 
 ```bash
-node src/main.ts service install user --admin
+node src/main.ts service install user            # lama-engine: enabled, idles
+node src/main.ts service install user --admin    # lama-admin: enabled and started
 systemctl --user status lama-admin --no-pager
 ```
 
-`lama-admin` starts now, `lama-engine` is enabled but idles until a model is selected (so it never
-crash-loops). To keep it running after you log out: `loginctl enable-linger "$USER"`.
+`service install` handles one unit per run, so both lines are needed. `lama-admin` starts now,
+`lama-engine` is enabled but idles until a model is selected (so it never crash-loops). To keep it
+running after you log out: `loginctl enable-linger "$USER"`.
 
 ### 7. Open the admin UI
 

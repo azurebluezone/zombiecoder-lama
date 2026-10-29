@@ -760,6 +760,7 @@ npm install`,
         title: "5. Create the token, database and services",
         body: "The last line prints your admin token. Copy it somewhere safe; it is the only password.",
         code: `npm run setup
+node src/main.ts service install user
 node src/main.ts service install user --admin
 grep '^LAMA_ADMIN_TOKEN=' .env`,
       },
