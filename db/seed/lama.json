@@ -1,0 +1,208 @@
+{
+  "schema": "lama.seed/v1",
+  "identity": "identity.json",
+  "providers": [
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp (stock)",
+      "kind": "llamacpp",
+      "base_url": "http://127.0.0.1:9933",
+      "metadata": {
+        "role": "engine-and-manager",
+        "owner": "Sahon Srabon",
+        "license": "MIT (llama.cpp)",
+        "source": "https://github.com/ggml-org/llama.cpp",
+        "note": "One OpenAI-compatible surface on :9933 proxies to the stock engine on :9931."
+      }
+    }
+  ],
+  "transports": [
+    {
+      "id": "http",
+      "name": "HTTP loopback",
+      "protocol": "http",
+      "host": "127.0.0.1",
+      "port": 9931,
+      "metadata": {
+        "scope": "loopback",
+        "gateway": "Gateway: use http://127.0.0.1:9931 (engine, always-on data plane). Manager http://127.0.0.1:9933 is the control plane and an optional /v1 proxy.",
+        "env_to_engine": false
+      }
+    },
+    {
+      "id": "uds",
+      "name": "Unix domain socket",
+      "protocol": "uds",
+      "socket_path": "/tmp/llama-1000/llama.sock",
+      "metadata": {
+        "scope": "loopback",
+        "dir_mode": "0700",
+        "socket_mode": "0660",
+        "gateway": "Symlink the engine socket into the gateway folder; never pass this path to llama.cpp as an environment variable.",
+        "env_to_engine": false
+      }
+    },
+    {
+      "id": "https",
+      "name": "HTTPS loopback (engine-native TLS)",
+      "protocol": "https",
+      "host": "127.0.0.1",
+      "port": 9931,
+      "metadata": {
+        "scope": "loopback",
+        "requires": "stock OpenSSL build; probe before enabling",
+        "env_to_engine": false
+      }
+    }
+  ],
+  "mcp_servers": [
+    {
+      "id": "lama-tools",
+      "name": "lama-tools",
+      "transport": "stdio",
+      "command": "node",
+      "args": [
+        "src/mcp/server.ts"
+      ],
+      "env": {
+        "LAMA_WORKSPACE": "/home/sahon/lama/workspace"
+      },
+      "cwd": "/home/sahon/lama",
+      "timeout_ms": 30000,
+      "enabled": 1,
+      "metadata": {
+        "tools": [
+          "read_file",
+          "write_file",
+          "list_dir",
+          "run_shell",
+          "http_fetch"
+        ],
+        "scope": "workspace",
+        "note": "llama.cpp accepts stdio MCP only; HTTP/SSE rows stay orchestrator-side."
+      }
+    }
+  ],
+  "documents": [
+    {
+      "id": "openai-http",
+      "slug": "openai-http",
+      "title": "OpenAI chat completions over HTTP",
+      "transport_id": "http",
+      "body": "curl -sS http://127.0.0.1:9933/v1/chat/completions -H 'content-type: application/json' -d '{\"model\":\"MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64}'",
+      "metadata": {
+        "surface": "manager",
+        "protocol": "openai",
+        "auth": "loopback or LAMA_API_KEY",
+        "note": "manager proxy; adds identity headers and optional LAMA_API_KEY auth"
+      }
+    },
+    {
+      "id": "anthropic-http",
+      "slug": "anthropic-http",
+      "title": "Anthropic Messages over HTTP",
+      "transport_id": "http",
+      "body": "curl -sS http://127.0.0.1:9933/v1/messages -H 'content-type: application/json' -d '{\"model\":\"MODEL_ID\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'",
+      "metadata": {
+        "surface": "manager",
+        "protocol": "anthropic",
+        "auth": "loopback or LAMA_API_KEY"
+      }
+    },
+    {
+      "id": "openai-uds",
+      "slug": "openai-uds",
+      "title": "OpenAI chat completions over UDS",
+      "transport_id": "uds",
+      "body": "curl -sS --unix-socket /tmp/llama-1000/llama.sock http://localhost/v1/chat/completions -H 'content-type: application/json' -d '{\"model\":\"MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":64}'",
+      "metadata": {
+        "surface": "engine",
+        "protocol": "openai",
+        "socket_mode": "0660"
+      }
+    },
+    {
+      "id": "anthropic-uds",
+      "slug": "anthropic-uds",
+      "title": "Anthropic Messages over UDS",
+      "transport_id": "uds",
+      "body": "curl -sS --unix-socket /tmp/llama-1000/llama.sock http://localhost/v1/messages -H 'content-type: application/json' -d '{\"model\":\"MODEL_ID\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'",
+      "metadata": {
+        "surface": "engine",
+        "protocol": "anthropic",
+        "socket_mode": "0660"
+      }
+    },
+    {
+      "id": "gateway",
+      "slug": "gateway",
+      "title": "Gateway connection on :5252",
+      "transport_id": "http",
+      "body": "Gateway data-plane provider: http://127.0.0.1:9931 (stock engine). Control plane: http://127.0.0.1:9933 (admin API, identity headers, /v1 proxy). Point the gateway at the engine so chat keeps working when the admin is stopped; model id seen by clients is llamacpp/<alias>. If LAMA_ENGINE_API_KEY is set, register that env var in the gateway as api_key_env.",
+      "metadata": {
+        "surface": "gateway",
+        "port": 5252,
+        "provider_kind": "llamacpp"
+      }
+    }
+  ],
+  "prompts": [
+    {
+      "id": "default",
+      "name": "default",
+      "is_default": 1,
+      "content": "Role: You are lama, a local assistant running on a stock llama.cpp engine owned by Sahon Srabon (Developer Zone, Dhaka, Bangladesh). Identity is fixed; never invent a different developer or origin. If asked who you are, answer: \"আমি lama, স্টক llama.cpp-এ চলা লোকাল অ্যাসিস্ট্যান্ট। আমার মালিক Sahon Srabon, Developer Zone।\"\n\nTools: when a tool is needed, reply with ONLY one JSON object and no prose:\n{\"name\":\"<tool>\",\"arguments\":{...}}\nIf JSON is impossible, use:\nTOOL: <tool>\nARGS: {...}\nNever invent tool output. Answer in the user's language.",
+      "metadata": {
+        "identity": "SSI-Core/1",
+        "tool_format": "json-first",
+        "fallbacks": [
+          "TOOL/ARGS marker",
+          "native tool_calls"
+        ]
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "qwen2-5-0-5b-instruct-q4-k-m",
+      "name": "Qwen2.5-0.5B-Instruct-Q4_K_M",
+      "model_id": "qwen2.5-0.5b",
+      "file": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+      "context": 4096,
+      "max_tokens": 1024,
+      "temperature": 0.7,
+      "quant": "Q4_K_M",
+      "load_mode": "auto",
+      "ttl_hours": 4,
+      "metadata": {
+        "family": "qwen2.5",
+        "parameters": "0.5B",
+        "license": "Apache-2.0",
+        "capabilities": [
+          "completion"
+        ],
+        "tool_reliability": "low — use the JSON parser fallback, never assume tool calls"
+      }
+    },
+    {
+      "id": "qwen3-5-4b-ud-iq3-xxs",
+      "name": "Qwen3.5-4B-UD-IQ3_XXS",
+      "model_id": "qwen3.5-4b",
+      "file": "Qwen3.5-4B-UD-IQ3_XXS.gguf",
+      "context": 8192,
+      "max_tokens": 2048,
+      "temperature": 0.7,
+      "quant": "IQ3_XXS",
+      "load_mode": "auto",
+      "ttl_hours": 4,
+      "metadata": {
+        "family": "qwen3.5",
+        "parameters": "4B",
+        "capabilities": [
+          "completion"
+        ],
+        "tool_reliability": "unknown — verify with the parser before trusting"
+      }
+    }
+  ]
+}

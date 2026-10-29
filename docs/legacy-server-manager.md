@@ -9,7 +9,7 @@ lama/
   scripts/setup.mjs     cross-OS setup: finds llama, writes .env, systemd unit / setx
   scripts/lamactl.mjs   CLI: status | models | load | unload | download | logs | requests
   server/server.mjs     the manager (Node built-ins only, zero npm deps)
-  server/public/        admin UI (browser)
+  server/public/        (removed) admin UI now lives in web/
   templates/            systemd unit, .env template, Windows starter, MCP config
   models/               GGUFs land here (also the scan source)
   logs/                 mgmt.jsonl + llama-<alias>.log
@@ -26,7 +26,7 @@ node scripts/lamactl.mjs load llama-3-2-1b-instruct-abliterated-q5-k-s
 node scripts/lamactl.mjs requests 5
 ```
 
-Admin UI: `http://127.0.0.1:9933/admin`
+Admin UI: `http://127.0.0.1:9933/` (current TypeScript admin; this legacy file no longer serves HTML)
 
 ## Run (Windows)
 
@@ -64,7 +64,7 @@ every engine flag is still yours to pass through.
 | `GET /api/chat/runs` / `GET /api/chat/stats` | history + per-model tokens/calls/latency |
 | `/v1/*`, `/props`, `/tokenize`, `/detokenize`, `/slots`, `/metrics` | streamed proxy to the engine (incl. SSE; usage parsed into the log) |
 | `GET /healthz` | manager liveness (no auth) |
-| `GET /admin` | UI |
+| `GET /admin` | `410 Gone` — UI moved to `src/` + `web/` |
 
 If `LAMA_API_KEY` is set, `/api/*` and every proxied route need
 `Authorization: Bearer <key>`.
@@ -152,7 +152,7 @@ admin topbar shows the build and turns amber on a mismatch.
 `/api/models` adds `mapping` per model: `slug` (`llamacpp/<alias>`), `alias`,
 `env_registered` (CP_LLAMACPP_MODELS), `catalog_id` (live `GET /v1/models` on
 the gateway) and `state` = `live | pending-restart | catalog-only | not-mapped`.
-See `docs/AUDIT.md` for the code-vs-docs audit that produced these fixes. Reasoning models show their
+See `legacy-audit.md` for the code-vs-docs audit that produced these fixes. Reasoning models show their
 `reasoning_content` / `thinking` blocks labelled as such when the visible
 content is empty.
 

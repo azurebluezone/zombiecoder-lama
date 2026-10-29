@@ -8,7 +8,7 @@
  *     --host *.sock, MCP via --mcp-servers-config, tools via chat templates.
  *     No SDK dependency, no custom TLS layer — when TLS is off, the https
  *     self-test reports "skipped" instead of faking a pass.
- *   - Admin UI is served from server/public/admin.html only. No HTML in JS.
+ *   - Legacy manager: the admin UI moved to the TypeScript app in src/ + web/.
  *   - models/catalog.json is the download ledger: a model is downloaded once;
  *     repeat requests return the existing file.
  *   - Gateway concerns (provider mapping) live in the gateway's own admin,
@@ -935,8 +935,6 @@ function proxy(req, res) {
 }
 
 // ---- auth + routing ---------------------------------------------------------------
-const ADMIN_HTML = path.join(LAMA, "server", "public", "admin.html");
-
 function authorized(req) {
   if (!cfg.LAMA_API_KEY) return true;
   return req.headers.authorization === `Bearer ${cfg.LAMA_API_KEY}`;
@@ -1167,15 +1165,15 @@ const server = http.createServer(async (req, res) => {
     return send(200, { lines });
   }
   if (p === "/admin" || p === "/") {
-    res.writeHead(200, { "content-type": "text/html" });
-    return fs.createReadStream(ADMIN_HTML).pipe(res);
+    // The legacy HTML admin was removed; the current UI ships with the TypeScript manager.
+    return send(410, { error: { code: 410, message: "legacy admin removed; use the current lama admin (npm start)", type: "gone_error" } });
   }
   if (p === "/favicon.ico") { res.writeHead(204); return res.end(); }
   if (PROXIED.some((re) => re.test(p))) return proxy(req, res);
-  send(404, { error: { code: 404, message: "no such route — see /admin", type: "invalid_request_error" } });
+  send(404, { error: { code: 404, message: "no such route — legacy manager, admin moved to npm start", type: "invalid_request_error" } });
 });
 
 server.listen(cfg.LAMA_MGMT_PORT, cfg.LAMA_MGMT_HOST, () => {
   log({ kind: "start", mgmt: `http://${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT}`, llama_base: LLAMA_ORIGIN, llama_bin: cfg.LLAMA_BIN, tls: LLAMA_TLS, uds: cfg.LAMA_UDS_SOCK || null });
-  process.stdout.write(`lama manager on http://${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT}/admin (llama base ${LLAMA_ORIGIN}, tls=${LLAMA_TLS}, uds=${cfg.LAMA_UDS_SOCK || "off"})\n`);
+  process.stdout.write(`legacy lama manager on http://${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT} (llama base ${LLAMA_ORIGIN}, tls=${LLAMA_TLS}, uds=${cfg.LAMA_UDS_SOCK || "off"})\n`);
 });

@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>lama · Admin</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    <div class="app">
+        <header class="topbar">
+            <div class="brand"><button class="top-icon mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button><span class="logo">L</span><span class="brand-label">lama
+                    <span class="muted" style="font-weight:400">Admin</span></span></div>
+            <div class="top-actions"><span class="top-pill" id="identityPill"><span class="dot"></span> <span id="identityName">lama</span></span><span class="top-pill" id="headerStatus"><span class="dot"></span> Connecting…</span><button class="top-icon" id="headerRefresh" title="Refresh data">↻</button><button class="top-icon" id="headerSettings" title="Connection &amp; auth">⚙</button></div>
+        </header>
+        <div class="shell">
+            <aside class="sidebar" id="sidebar">
+                <div class="side-inner">
+                    <div class="nav-group">
+                        <div class="group-label">Workspace</div>
+                        <button class="nav active" data-view="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</button>
+                    </div>
+                    <div class="nav-group">
+                        <div class="group-label">Engine</div>
+                        <button class="nav" data-view="models"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 9h6v6H9zM9 1v3m6-3v3M9 20v3m6-3v3M1 9h3m-3 6h3m16-6h3m-3 6h3"/></svg>Model List <span class="new" id="navModelCount">0</span></button>
+                        <button class="nav" data-view="chat"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/></svg>Model Playground</button>
+                        <button class="nav" data-view="runtime"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 4h16v16H4zM8 8h8v8H8zM1 8h3m-3 8h3m16-8h3m-3 8h3M8 1v3m8-3v3m-8 16v3m8-3v3"/></svg>Runtime</button>
+                    </div>
+                    <div class="nav-group">
+                        <div class="group-label">Registry</div>
+                        <button class="nav" data-view="transports"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 7h16M4 12h16M4 17h10"/></svg>Transports &amp; Docs</button>
+                        <button class="nav" data-view="mcp"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 3v6m0 6v6M3 12h6m6 0h6"/><circle cx="12" cy="12" r="4"/></svg>MCP Servers</button>
+                        <button class="nav" data-view="prompts"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>Prompts</button>
+                        <button class="nav" data-view="tools"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m14 6 4 4-8 8H6v-4z"/><path d="M4 20h16"/></svg>Tool Parser</button>
+                    </div>
+                    <div class="nav-group">
+                        <div class="group-label">System</div>
+                        <button class="nav" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="m19 13.5 2 1.5-2 3-2.5-1-2 1v2h-4v-2l-2-1-2.5 1-2-3 2-1.5v-3L2 9l2-3 2.5 1 2-1V4h4v2l2 1 2.5-1 2 3-2 1.5z"/></svg>Connection &amp; Auth</button>
+                    </div>
+                </div>
+                <div class="side-foot">lama admin<br><span class="muted" id="sideIdentity">stock llama.cpp</span></div>
+            </aside>
+            <main class="main" id="main">
+                <section class="view active" id="view-dashboard">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Overview</h1>
+                            <p class="sub">Live state of the local llama.cpp engine, the registry and the admin API.</p>
+                        </div>
+                        <div><button class="btn" id="refreshAll">↻ Refresh</button><button class="btn green" data-go="models">Browse models ↗</button></div>
+                    </div>
+                    <div class="grid stats">
+                        <div class="panel stat">
+                            <div class="stat-label">Models <span style="color:var(--green)">▦</span></div>
+                            <div class="stat-value" id="statModels">—</div>
+                            <div class="stat-note" id="statModelsNote">registry</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">Engine <span style="color:var(--green)">◉</span></div>
+                            <div class="stat-value" style="font-size:15px;margin-top:12px" id="statEngine"><span class="tag amber"><span class="dot"></span> —</span></div>
+                            <div class="stat-note" id="statEngineNote">waiting for /api/state</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">Loaded model <span style="color:var(--blue)">⌁</span></div>
+                            <div class="stat-value" style="font-size:14px;margin-top:10px" id="statLoaded">—</div>
+                            <div class="stat-note" id="statLoadedNote">nothing loaded</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">Registry <span style="color:var(--green)">●</span></div>
+                            <div class="stat-value" id="statRegistry">—</div>
+                            <div class="stat-note" id="statRegistryNote">mcp · transports · docs</div>
+                        </div>
+                    </div>
+                    <div class="grid dashboard-grid">
+                        <div class="panel">
+                            <div class="panel-head">
+                                <div>
+                                    <div class="panel-title">System snapshot</div>
+                                    <div class="panel-desc">Values come from GET /api/state</div>
+                                </div><span class="tag green" id="dashMode">LIVE</span>
+                            </div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k">Engine (data plane)</span><span class="v mono" id="dashEngine">—</span></div>
+                                <div class="kv"><span class="k">Admin (control plane)</span><span class="v mono" id="dashAdmin">—</span></div>
+                                <div class="kv"><span class="k">Unix socket</span><span class="v mono" id="dashUds">—</span></div>
+                                <div class="kv"><span class="k">Database</span><span class="v mono" id="dashDb">—</span></div>
+                                <div class="kv"><span class="k">Provider</span><span class="v mono" id="dashProvider">—</span></div>
+                                <div class="kv"><span class="k">Service mode</span><span class="v" id="dashService">—</span></div>
+                                <div class="kv"><span class="k">Identity</span><span class="v" id="dashIdentity">—</span></div>
+                                <div class="kv"><span class="k">Last update</span><span class="v" id="lastUpdate">—</span></div>
+                                <div class="pill-row" style="margin-top:13px"><button class="btn green" data-go="runtime">Engine controls</button><button class="btn" data-go="models">Manage models</button></div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head">
+                                <div>
+                                    <div class="panel-title">Quick actions</div>
+                                    <div class="panel-desc">Every action calls the same HTTP API</div>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div class="grid quick-grid">
+                                    <button class="quick" data-go="models"><span class="quick-icon">▦</span><strong>Load a model</strong><span>Pick a GGUF row and start the engine</span></button>
+                                    <button class="quick" data-go="chat"><span class="quick-icon">◇</span><strong>Playground</strong><span>Send a real chat completion</span></button>
+                                    <button class="quick" data-go="mcp"><span class="quick-icon">⌗</span><strong>MCP servers</strong><span>Sync tools into the engine config</span></button>
+                                    <button class="quick" data-go="tools"><span class="quick-icon">≡</span><strong>Tool parser</strong><span>Parse model output, then call a tool</span></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel" style="margin-top:11px">
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Audit trail</div>
+                                <div class="panel-desc">Newest events recorded in SQLite (GET /api/audit)</div>
+                            </div>
+                            <div class="pill-row"><input class="field" id="activitySearch" placeholder="Filter event, target, actor…" style="width:230px"><button class="btn small" id="activityRefresh">↻ Refresh</button></div>
+                        </div>
+                        <div class="table-wrap" style="border:0;border-radius:0">
+                            <table style="min-width:720px">
+                                <thead><tr><th>TIME</th><th>ACTOR</th><th>EVENT</th><th>TARGET</th><th>DETAIL</th></tr></thead>
+                                <tbody id="activityTable"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-models">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Model List</h1>
+                            <p class="sub">One model runs at a time; loading another stops the current one.</p>
+                        </div>
+                        <div><button class="btn" id="modelRefresh">↻ Refresh list</button><button class="btn green" id="loadModelTop">＋ Register model</button></div>
+                    </div>
+                    <div class="toolbar">
+                        <div class="search"><input id="modelSearch" placeholder="Search models, ids, paths…"></div>
+                        <select class="select" id="modelProviderFilter"><option value="all">All providers</option></select>
+                        <select class="select" id="modelStatusFilter"><option value="all">All states</option><option value="loaded">Loaded</option><option value="available">Available</option></select>
+                        <span class="tag" id="modelCount">—</span>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Model catalogue</div>
+                                <div class="panel-desc">Rows come from the SQLite registry, not from the page.</div>
+                            </div><span class="tag" id="modelCountBadge">—</span>
+                        </div>
+                        <div class="model-grid" id="modelsGrid"></div>
+                        <div class="empty" id="modelsEmpty" style="display:none">
+                            <div class="empty-icon">⌕</div><strong>No models match</strong>
+                            <p>Change the search or register a GGUF file.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-chat">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Model Playground</h1>
+                            <p class="sub">Sends a real request through the manager proxy at /v1/chat/completions.</p>
+                        </div><span class="tag amber" id="chatBadge">NO REQUEST YET</span>
+                    </div>
+                    <div class="chat-layout">
+                        <div class="panel chat-side">
+                            <div class="panel-title" style="margin-bottom:12px">Test configuration</div>
+                            <div class="form-row" style="margin-bottom:12px"><label>MODEL</label><select class="field" id="chatModel"></select></div>
+                            <div class="form-row" style="margin-bottom:12px"><label>ENDPOINT</label><input class="field mono" id="chatBase" value="/v1/chat/completions" readonly></div>
+                            <div class="form-row" style="margin-bottom:12px"><label>SYSTEM PROMPT</label><select class="field" id="chatSystem"><option value="">None</option></select></div>
+                            <div class="form-row" style="margin-bottom:12px"><label>TEMPERATURE</label><input class="field" id="chatTemperature" type="number" min="0" max="2" step="0.1" value="0.7"></div>
+                            <div class="form-row" style="margin-bottom:12px"><label>MAX TOKENS</label><input class="field" id="chatMaxTokens" type="number" min="1" max="32768" value="512"></div>
+                            <button class="btn" id="chatClear" style="width:100%">Clear conversation</button>
+                        </div>
+                        <div class="panel" style="display:flex;flex-direction:column;min-width:0">
+                            <div class="panel-head">
+                                <div>
+                                    <div class="panel-title">Conversation</div>
+                                    <div class="panel-desc" id="chatStatus">No request sent yet</div>
+                                    <div id="chatMeta" class="chip-list" style="margin-top:6px"></div>
+                                </div><button class="btn small" id="chatExport">Copy transcript</button>
+                            </div>
+                            <div class="chat-transcript" id="chatTranscript">
+                                <div class="chat-empty"><strong>Ready to test a model</strong>Select a model, type a prompt and send. The engine must be loaded first.</div>
+                            </div>
+                            <div class="chat-compose"><textarea class="field" id="chatPrompt" placeholder="Message the selected model… (Ctrl/⌘ + Enter to send)" rows="2"></textarea><button class="btn green" id="chatSend">Send</button></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-runtime">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Runtime</h1>
+                            <p class="sub">Single-model engine: load, reload and TTL expiry.</p>
+                        </div>
+                        <div><button class="btn" id="runtimeRefresh">↻ Refresh runtime</button><button class="btn" data-go="models">Manage models</button></div>
+                    </div>
+                    <div class="grid stats">
+                        <div class="panel stat">
+                            <div class="stat-label">Status</div>
+                            <div class="stat-value" style="font-size:16px;margin-top:12px" id="runtimeState"><span class="tag amber"><span class="dot"></span> —</span></div>
+                            <div class="stat-note" id="runtimePid">no pid</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">Model</div>
+                            <div class="stat-value" style="font-size:13px;margin-top:11px" id="runtimeModel">—</div>
+                            <div class="stat-note" id="runtimeLoadMode">load mode —</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">Expires</div>
+                            <div class="stat-value" style="font-size:14px;margin-top:11px" id="runtimeExpires">—</div>
+                            <div class="stat-note" id="runtimeStarted">started —</div>
+                        </div>
+                        <div class="panel stat">
+                            <div class="stat-label">mmap proof</div>
+                            <div class="stat-value" style="font-size:14px;margin-top:11px" id="runtimeMmap">—</div>
+                            <div class="stat-note" id="runtimeMmapNote">/proc/&lt;pid&gt;/maps</div>
+                        </div>
+                    </div>
+                    <div class="grid two">
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Engine controls</div><div class="panel-desc">Empty TTL means the model default.</div></div></div>
+                            <div class="panel-body">
+                                <div class="form-grid">
+                                    <div class="form-row full"><label>MODEL</label><select class="field" id="rtModel"></select></div>
+                                    <div class="form-row"><label>TTL HOURS</label><input class="field" id="rtTtl" type="number" min="0" max="720" step="0.01" placeholder="default"></div>
+                                    <div class="form-row"><label>SERVICE MODE</label><select class="field" id="rtService"><option value="none">none</option><option value="user">user</option><option value="system">system</option></select></div>
+                                </div>
+                                <div class="pill-row" style="margin-top:12px"><button class="btn green" id="rtLoad">Load</button><button class="btn" id="rtReload">Reload</button><button class="btn danger" id="rtUnload">Unload</button><button class="btn" id="rtServiceSave">Save mode</button></div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Engine details</div><div class="panel-desc">GET /api/engine/status</div></div></div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k">Socket</span><span class="v mono" id="rtSocket">—</span></div>
+                                <div class="kv"><span class="k">Port</span><span class="v mono" id="rtPort">—</span></div>
+                                <div class="kv"><span class="k">Build</span><span class="v mono" id="rtBuild">—</span></div>
+                                <div class="kv"><span class="k">Provider</span><span class="v mono" id="rtProvider">—</span></div>
+                                <div class="kv"><span class="k">Last error</span><span class="v" id="rtError">—</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Raw state</div><div class="panel-desc">engine_state row</div></div></div>
+                        <pre class="code" id="rtRaw">{}</pre>
+                    </div>
+                </section>
+
+                <section class="view" id="view-transports">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Transports &amp; Documents</h1>
+                            <p class="sub">HTTP, HTTPS and UDS connection points with verified curl documents.</p>
+                        </div>
+                        <div><button class="btn" id="transportRefresh">↻ Refresh</button><button class="btn green" id="addTransport">＋ Add transport</button><button class="btn" id="addDocument">＋ Add document</button></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Transports</div><div class="panel-desc">Probe sends a real /v1/models request over the transport.</div></div></div>
+                        <div class="table-wrap" style="border:0">
+                            <table>
+                                <thead><tr><th>ID</th><th>PROTOCOL</th><th>ENDPOINT</th><th>GATEWAY HINT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <tbody id="transportsTable"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Documents</div><div class="panel-desc">Verify runs the stored command against the engine.</div></div></div>
+                        <div class="table-wrap" style="border:0">
+                            <table>
+                                <thead><tr><th>SLUG</th><th>TITLE</th><th>TRANSPORT</th><th>VERIFIED</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <tbody id="documentsTable"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-mcp">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">MCP Servers</h1>
+                            <p class="sub">llama.cpp accepts stdio MCP servers only; HTTP/SSE rows stay orchestrator-side.</p>
+                        </div>
+                        <div><button class="btn" id="mcpRefresh">↻ Refresh</button><button class="btn" id="mcpSync">↻ Sync config</button><button class="btn" id="mcpShowConfig">View config</button><button class="btn green" id="addMcp">＋ Add server</button></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Servers</div><div class="panel-desc">Probe starts the server and lists its tools.</div></div><span class="tag" id="mcpCount">—</span></div>
+                        <div class="table-wrap" style="border:0">
+                            <table>
+                                <thead><tr><th>NAME</th><th>TRANSPORT</th><th>COMMAND / URL</th><th>ENV</th><th>TIMEOUT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <tbody id="mcpTable"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Generated engine config</div><div class="panel-desc" id="mcpConfigPath">data/mcp-servers.generated.json</div></div></div>
+                        <pre class="code" id="mcpConfig">Not loaded.</pre>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Engine tools</div><div class="panel-desc">GET /tools on the engine (after a load)</div></div></div>
+                        <div class="panel-body"><div class="chip-list" id="mcpTools"><span class="muted">Not loaded.</span></div></div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-prompts">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Prompts</h1>
+                            <p class="sub">Append-only versions; the default prompt is anchored to the identity.</p>
+                        </div>
+                        <div><button class="btn" id="promptRefresh">↻ Refresh</button><button class="btn green" id="addPrompt">＋ Add prompt</button></div>
+                    </div>
+                    <div class="panel">
+                        <div class="table-wrap" style="border:0">
+                            <table>
+                                <thead><tr><th>NAME</th><th>VERSION</th><th>DEFAULT</th><th>CONTENT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <tbody id="promptsTable"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-tools">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Tool Parser</h1>
+                            <p class="sub">Parsing never executes; execution is a separate audited call.</p>
+                        </div><span class="tag" id="toolsStages">—</span>
+                    </div>
+                    <div class="grid two">
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Model output</div><div class="panel-desc">Native tool_calls, TOOL/ARGS markers or a bare JSON block.</div></div></div>
+                            <div class="panel-body">
+                                <textarea class="field mono" id="parseText" rows="6" placeholder='{"name":"read_file","arguments":{"path":"README.md"}}'></textarea>
+                                <div class="pill-row" style="margin-top:10px"><button class="btn green" id="parseRun">Parse</button><button class="btn" id="parseClear">Clear</button></div>
+                                <pre class="code" id="parseResult">No parse performed.</pre>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Execute a tool</div><div class="panel-desc">POST /api/tools/call — workspace scoped.</div></div></div>
+                            <div class="panel-body">
+                                <div class="form-grid">
+                                    <div class="form-row full"><label>TOOL</label><select class="field" id="callName"></select></div>
+                                    <div class="form-row full"><label>ARGUMENTS (JSON)</label><textarea class="field mono" id="callArgs" rows="5">{}</textarea></div>
+                                </div>
+                                <div class="pill-row" style="margin-top:10px"><button class="btn green" id="callRun">Run tool</button></div>
+                                <pre class="code" id="callResult">No call performed.</pre>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Available MCP tools</div><div class="panel-desc">Built into the lama MCP server</div></div></div>
+                        <div class="panel-body"><div class="stack" id="toolList"><span class="muted">Not loaded.</span></div></div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-settings">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Connection &amp; Auth</h1>
+                            <p class="sub">The token stays in this tab (sessionStorage) and is never written to disk.</p>
+                        </div><span class="tag amber" id="settingsStatus">CHECKING…</span>
+                    </div>
+                    <div class="grid two">
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Admin token</div><div class="panel-desc">Required for /api/*; wrong token returns 401.</div></div></div>
+                            <div class="panel-body">
+                                <div class="form-grid">
+                                    <div class="form-row full"><label>TOKEN</label><input class="field" id="admToken" type="password" autocomplete="current-password" placeholder="paste LAMA_ADMIN_TOKEN"></div>
+                                </div>
+                                <div class="pill-row" style="margin-top:10px"><button class="btn green" id="admConnect">Connect</button><button class="btn danger" id="admForget">Forget token</button></div>
+                                <p class="sub" style="margin-top:10px">Read it with <span class="mono">grep '^LAMA_ADMIN_TOKEN=' .env</span> on the host.</p>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Endpoints</div><div class="panel-desc">Resolved from the running config</div></div></div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k">Admin</span><span class="v mono" id="setAdmin">—</span></div>
+                                <div class="kv"><span class="k">Engine</span><span class="v mono" id="setEngine">—</span></div>
+                                <div class="kv"><span class="k">Unix socket</span><span class="v mono" id="setUds">—</span></div>
+                                <div class="kv"><span class="k">Database</span><span class="v mono" id="setDb">—</span></div>
+                                <div class="kv"><span class="k">Project root</span><span class="v mono" id="setRoot">—</span></div>
+                                <div class="kv"><span class="k">Service mode</span><span class="v" id="setService">—</span></div>
+                                <div class="kv"><span class="k">OS</span><span class="v" id="setOs">—</span></div>
+                                <div class="kv"><span class="k">TLS</span><span class="v" id="setTls">—</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid two" style="margin-top:11px">
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">System identity</div><div class="panel-desc" id="identityFile">identity.json</div></div><span class="tag green" id="identityBadge">SSI-Core</span></div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k">Name</span><span class="v" id="idName">—</span></div>
+                                <div class="kv"><span class="k">Version</span><span class="v" id="idVersion">—</span></div>
+                                <div class="kv"><span class="k">Tagline</span><span class="v" id="idTagline">—</span></div>
+                                <div class="kv"><span class="k">Owner</span><span class="v" id="idOwner">—</span></div>
+                                <div class="kv"><span class="k">Organization</span><span class="v" id="idOrg">—</span></div>
+                                <div class="kv"><span class="k">Location</span><span class="v" id="idLocation">—</span></div>
+                                <div class="kv"><span class="k">Contact</span><span class="v" id="idContact">—</span></div>
+                                <div class="kv"><span class="k">License</span><span class="v" id="idLicense">—</span></div>
+                                <div class="kv"><span class="k">Protocol</span><span class="v" id="idProtocol">—</span></div>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Response headers</div><div class="panel-desc">Stamped on every admin response</div></div></div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k mono">x-system-identity</span><span class="v mono" id="hIdentity">—</span></div>
+                                <div class="kv"><span class="k mono">x-system-version</span><span class="v mono" id="hVersion">—</span></div>
+                                <div class="kv"><span class="k mono">x-system-owner</span><span class="v mono" id="hOwner">—</span></div>
+                                <div class="kv"><span class="k mono">x-powered-by</span><span class="v mono" id="hPowered">—</span></div>
+                                <div class="kv"><span class="k">Prompt anchor</span><span class="v" id="hPrompt">—</span></div>
+                                <pre class="code" id="identityRaw" style="margin-top:10px">{}</pre>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="panel" style="margin-top:11px">
+                        <div class="panel-head"><div><div class="panel-title">Safety notes</div><div class="panel-desc">What the admin will and will not do</div></div></div>
+                        <div class="panel-body"><div class="stack" id="safetyNotes"><span class="muted">Loading…</span></div></div>
+                    </div>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div class="auth-gate" id="authGate" hidden>
+        <form class="auth-card" id="authForm">
+            <div class="panel-title">Admin token required</div>
+            <p class="sub" style="margin:6px 0 12px">Paste the token from <span class="mono">.env</span> (LAMA_ADMIN_TOKEN). It is kept in this browser tab only.</p>
+            <input class="field" id="authToken" type="password" autocomplete="current-password" placeholder="admin token" required>
+            <div class="pill-row" style="margin-top:10px"><button class="btn green" type="submit">Unlock admin</button></div>
+            <p class="sub" id="authError" style="margin-top:10px;color:var(--red)"></p>
+        </form>
+    </div>
+
+    <div class="modal-backdrop" id="modalBackdrop" role="dialog" aria-modal="true">
+        <div class="modal">
+            <div class="modal-head">
+                <div class="modal-title" id="modalTitle">Details</div><button class="top-icon" id="modalClose" aria-label="Close">×</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+            <div class="modal-foot" id="modalFoot"><button class="btn" id="modalCancel">Close</button></div>
+        </div>
+    </div>
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/app.js"></script>
+</body>
+
+</html>

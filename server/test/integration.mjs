@@ -286,10 +286,7 @@ const api = async (p, init) => {
   check("manager: chat run visible in history", runs.body.runs.length >= 1);
 
   const admin = await fetch(BASE + "/admin");
-  const html = await admin.text();
-  check("manager: admin UI serves the new views", admin.status === 200 && html.includes("Chat lab") && html.includes("MCP servers"));
-  check("manager: admin UI shows the engine version pill and the mapping-id column",
-    html.includes('id="pillVersion"') && html.includes("<th>mapping id</th>") && html.includes('id="gwMeta"'));
+  check("legacy manager: admin UI is gone (moved to the TypeScript app)", admin.status === 410);
 }
 
 manager.kill("SIGTERM");
