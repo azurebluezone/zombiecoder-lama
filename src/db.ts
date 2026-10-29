@@ -3,17 +3,23 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  AuditRow,
   DocumentRow,
   EngineState,
   McpRow,
+  McpToolRow,
   ModelRow,
   PromptRow,
   ProviderRow,
+  RequestLogInput,
+  RequestLogRow,
   SessionRow,
+  ToolUsageRow,
   TransportRow,
 } from "./types.ts";
 import type { Config } from "./config.ts";
 import type { OsInfo } from "./types.ts";
+import { MCP_TOOLS, TOOL_USE_CASES } from "./mcp/tools.ts";
 
 const now = (): string => new Date().toISOString();
 
@@ -168,6 +174,68 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       );
     `,
   },
+  {
+    version: 3,
+    sql: `
+      -- Every proxied or playground request lands here; the Models and Transports views
+      -- read their counters from this table instead of keeping page-local state.
+      CREATE TABLE IF NOT EXISTS request_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        model_id TEXT,
+        model_key TEXT,
+        provider_id TEXT,
+        transport_id TEXT,
+        protocol TEXT NOT NULL DEFAULT 'openai' CHECK (protocol IN ('openai','anthropic','other')),
+        endpoint TEXT NOT NULL,
+        method TEXT NOT NULL DEFAULT 'POST',
+        status INTEGER NOT NULL DEFAULT 0,
+        ok INTEGER NOT NULL DEFAULT 0 CHECK (ok IN (0,1)),
+        stream INTEGER NOT NULL DEFAULT 0 CHECK (stream IN (0,1)),
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        first_token_ms INTEGER,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        system_prompt_id TEXT,
+        detail TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_request_logs_at ON request_logs(at DESC);
+      CREATE INDEX IF NOT EXISTS idx_request_logs_model ON request_logs(model_id, at DESC);
+      CREATE INDEX IF NOT EXISTS idx_request_logs_transport ON request_logs(transport_id, at DESC);
+
+      CREATE TABLE IF NOT EXISTS tool_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        mcp_id TEXT,
+        ok INTEGER NOT NULL DEFAULT 0 CHECK (ok IN (0,1)),
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        detail TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_usage_tool ON tool_usage(tool, at DESC);
+
+      -- The MCP matrix: one row per advertised tool, its own on/off switch and the
+      -- human explanation of what it is for. Probe results refresh the list.
+      CREATE TABLE IF NOT EXISTS mcp_tools (
+        id TEXT PRIMARY KEY,
+        mcp_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        use_cases TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+        updated_at TEXT NOT NULL,
+        UNIQUE(mcp_id, name)
+      );
+
+      ALTER TABLE mcp_servers ADD COLUMN status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (status IN ('unknown','active','inactive'));
+      ALTER TABLE mcp_servers ADD COLUMN last_probe_at TEXT;
+      ALTER TABLE mcp_servers ADD COLUMN last_probe_detail TEXT NOT NULL DEFAULT '';
+      ALTER TABLE mcp_servers ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE mcp_servers ADD COLUMN tools_count INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 function slug(value: string): string {
@@ -182,6 +250,7 @@ function slug(value: string): string {
 
 export class Store {
   readonly db: DatabaseSync;
+  private auditListener: ((row: AuditRow) => void) | null = null;
 
   constructor(file: string) {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -280,19 +349,197 @@ export class Store {
     );
   }
 
+  setAuditListener(listener: ((row: AuditRow) => void) | null): void {
+    this.auditListener = listener;
+  }
+
   audit(action: string, target = "", detail = "", actor = "system"): void {
-    this.run(
-      "INSERT INTO audit_events(at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)",
-      now(),
-      actor,
-      action,
-      target,
-      detail,
+    const at = now();
+    const result = this.db
+      .prepare("INSERT INTO audit_events(at, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)")
+      .run(at, actor, action, target, detail);
+    if (!this.auditListener) return;
+    const row = this.one<AuditRow>("SELECT * FROM audit_events WHERE id = ?", Number(result.lastInsertRowid));
+    if (!row) return;
+    try {
+      this.auditListener(row);
+    } catch {
+      // A broken SSE client must never make an audit write fail.
+    }
+  }
+
+  listAudit(limit = 100): AuditRow[] {
+    return this.all("SELECT * FROM audit_events ORDER BY id DESC LIMIT ?", Math.min(Math.max(limit, 1), 500));
+  }
+
+  logRequest(input: RequestLogInput): RequestLogRow {
+    const at = input.at ?? now();
+    const result = this.db
+      .prepare(
+        `INSERT INTO request_logs(
+           at, model_id, model_key, provider_id, transport_id, protocol, endpoint, method,
+           status, ok, stream, duration_ms, first_token_ms, prompt_tokens, completion_tokens,
+           bytes, system_prompt_id, detail
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        at,
+        input.model_id,
+        input.model_key,
+        input.provider_id,
+        input.transport_id,
+        input.protocol,
+        input.endpoint,
+        input.method,
+        input.status,
+        input.ok,
+        input.stream,
+        input.duration_ms,
+        input.first_token_ms,
+        input.prompt_tokens,
+        input.completion_tokens,
+        input.bytes,
+        input.system_prompt_id,
+        input.detail,
+      );
+    return this.one<RequestLogRow>("SELECT * FROM request_logs WHERE id = ?", Number(result.lastInsertRowid))!;
+  }
+
+  listRequests(filter: {
+    limit?: number;
+    model_id?: string | null;
+    transport_id?: string | null;
+    protocol?: string | null;
+    ok?: boolean | null;
+  } = {}): RequestLogRow[] {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.model_id) {
+      clauses.push("model_id = ?");
+      params.push(filter.model_id);
+    }
+    if (filter.transport_id) {
+      clauses.push("transport_id = ?");
+      params.push(filter.transport_id);
+    }
+    if (filter.protocol) {
+      clauses.push("protocol = ?");
+      params.push(filter.protocol);
+    }
+    if (filter.ok !== undefined && filter.ok !== null) {
+      clauses.push("ok = ?");
+      params.push(filter.ok ? 1 : 0);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    params.push(Math.min(Math.max(filter.limit ?? 100, 1), 1000));
+    return this.all<RequestLogRow>(`SELECT * FROM request_logs${where} ORDER BY id DESC LIMIT ?`, ...params);
+  }
+
+  requestStats(hours = 0): Array<{
+    model_id: string | null;
+    transport_id: string | null;
+    total: number;
+    ok: number;
+    failed: number;
+    avg_ms: number;
+    last_at: string | null;
+    prompt_tokens: number;
+    completion_tokens: number;
+  }> {
+    const since = hours > 0 ? new Date(Date.now() - hours * 3600_000).toISOString() : null;
+    return this.all(
+      `SELECT model_id, transport_id, COUNT(*) AS total,
+              COALESCE(SUM(ok), 0) AS ok,
+              COUNT(*) - COALESCE(SUM(ok), 0) AS failed,
+              COALESCE(ROUND(AVG(duration_ms)), 0) AS avg_ms,
+              MAX(at) AS last_at,
+              COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+              COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+         FROM request_logs
+         ${since ? "WHERE at >= ?" : ""}
+        GROUP BY model_id, transport_id`,
+      ...(since ? [since] : []),
     );
   }
 
-  listAudit(limit = 100): Array<{ id: number; at: string; actor: string; action: string; target: string; detail: string }> {
-    return this.all("SELECT * FROM audit_events ORDER BY id DESC LIMIT ?", Math.min(Math.max(limit, 1), 500));
+  logToolUsage(input: { tool: string; mcp_id?: string | null; ok: boolean; duration_ms?: number; detail?: string }): ToolUsageRow {
+    const at = now();
+    const result = this.db
+      .prepare("INSERT INTO tool_usage(at, tool, mcp_id, ok, duration_ms, detail) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(at, input.tool, input.mcp_id ?? null, input.ok ? 1 : 0, input.duration_ms ?? 0, input.detail ?? "");
+    if (input.mcp_id) {
+      this.run("UPDATE mcp_servers SET use_count = use_count + 1, updated_at = ? WHERE id = ?", now(), input.mcp_id);
+    }
+    return this.one<ToolUsageRow>("SELECT * FROM tool_usage WHERE id = ?", Number(result.lastInsertRowid))!;
+  }
+
+  toolUsageStats(): Array<{ tool: string; calls: number; ok: number; failed: number; last_at: string | null; avg_ms: number }> {
+    return this.all(
+      `SELECT tool, COUNT(*) AS calls, COALESCE(SUM(ok), 0) AS ok,
+              COUNT(*) - COALESCE(SUM(ok), 0) AS failed, MAX(at) AS last_at,
+              COALESCE(ROUND(AVG(duration_ms)), 0) AS avg_ms
+         FROM tool_usage GROUP BY tool ORDER BY calls DESC`,
+    );
+  }
+
+  listMcpTools(mcpId?: string): McpToolRow[] {
+    return mcpId
+      ? this.all<McpToolRow>("SELECT * FROM mcp_tools WHERE mcp_id = ? ORDER BY name", mcpId)
+      : this.all<McpToolRow>("SELECT * FROM mcp_tools ORDER BY mcp_id, name");
+  }
+
+  upsertMcpTool(row: Omit<McpToolRow, "updated_at">): void {
+    this.run(
+      `INSERT INTO mcp_tools(id, mcp_id, name, description, use_cases, enabled, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         description = excluded.description,
+         use_cases = CASE WHEN mcp_tools.use_cases = '' THEN excluded.use_cases ELSE mcp_tools.use_cases END,
+         updated_at = excluded.updated_at`,
+      row.id,
+      row.mcp_id,
+      row.name,
+      row.description,
+      row.use_cases,
+      row.enabled,
+      now(),
+    );
+  }
+
+  toggleMcpTool(name: string, enabled: boolean): void {
+    this.run("UPDATE mcp_tools SET enabled = ?, updated_at = ? WHERE name = ?", enabled ? 1 : 0, now(), name);
+  }
+
+  setMcpProbe(id: string, ok: boolean, detail: string, tools: Array<{ name: string; description?: string }>): void {
+    const timestamp = now();
+    const existing = this.getMcp(id);
+    this.run(
+      "UPDATE mcp_servers SET status = ?, last_probe_at = ?, last_probe_detail = ?, tools_count = ?, updated_at = ? WHERE id = ?",
+      ok ? "active" : "inactive",
+      timestamp,
+      detail.slice(0, 1000),
+      tools.length,
+      timestamp,
+      id,
+    );
+    if (!existing) return;
+    for (const tool of tools) {
+      this.upsertMcpTool({
+        id: `${id}:${tool.name}`,
+        mcp_id: id,
+        name: tool.name,
+        description: tool.description ?? "",
+        use_cases: "",
+        enabled: 1,
+      });
+    }
+  }
+
+  promptUsage(): Array<{ system_prompt_id: string | null; runs: number; last_at: string | null }> {
+    return this.all(
+      `SELECT system_prompt_id, COUNT(*) AS runs, MAX(at) AS last_at
+         FROM request_logs WHERE system_prompt_id IS NOT NULL GROUP BY system_prompt_id`,
+    );
   }
 
   listProviders(): ProviderRow[] {
@@ -387,7 +634,12 @@ export class Store {
     return this.one("SELECT * FROM mcp_servers WHERE id = ?", id);
   }
 
-  upsertMcp(row: Omit<McpRow, "created_at" | "updated_at">): void {
+  upsertMcp(
+    row: Omit<
+      McpRow,
+      "created_at" | "updated_at" | "status" | "last_probe_at" | "last_probe_detail" | "use_count" | "tools_count"
+    >,
+  ): void {
     this.run(
       `INSERT INTO mcp_servers(id, name, transport, command, args_json, env_json, cwd, url, api_key_ref, timeout_ms, enabled, metadata_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -773,6 +1025,22 @@ export function seedStore(store: Store, cfg: Config, os: OsInfo): void {
       metadata_json: "{}",
     });
   }
+
+  // The matrix needs a row per advertised tool before the first probe, so the UI can show
+  // on/off switches and use cases immediately after setup.
+  for (const tool of MCP_TOOLS) {
+    store.upsertMcpTool({
+      id: `lama-tools:${tool.name}`,
+      mcp_id: "lama-tools",
+      name: tool.name,
+      description: tool.description,
+      use_cases: TOOL_USE_CASES[tool.name] ?? "",
+      enabled: 1,
+    });
+  }
+  store.run(
+    "UPDATE mcp_servers SET tools_count = (SELECT COUNT(*) FROM mcp_tools WHERE mcp_id = mcp_servers.id) WHERE id = 'lama-tools'",
+  );
 
   if (fs.existsSync(cfg.modelsDir)) {
     for (const entry of fs.readdirSync(cfg.modelsDir, { withFileTypes: true })) {

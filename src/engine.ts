@@ -190,16 +190,45 @@ export function mmapStatus(pid: number | null, modelPath: string | null): MmapSt
   }
 }
 
+export interface EngineProgress {
+  phase: "loading" | "waiting" | "running" | "stopping" | "stopped" | "reloading" | "error";
+  model_id: string | null;
+  detail: string;
+  elapsed_ms: number;
+  at: string;
+}
+
 export class EngineManager {
   private readonly store: Store;
   private readonly cfg: Config;
   private readonly os: OsInfo;
   private timer: NodeJS.Timeout | null = null;
+  private progressListener: ((event: EngineProgress) => void) | null = null;
+  private progressStarted = 0;
 
   constructor(store: Store, cfg: Config, os: OsInfo) {
     this.store = store;
     this.cfg = cfg;
     this.os = os;
+  }
+
+  setProgressListener(listener: ((event: EngineProgress) => void) | null): void {
+    this.progressListener = listener;
+  }
+
+  private emit(phase: EngineProgress["phase"], modelId: string | null, detail: string): void {
+    if (!this.progressListener) return;
+    try {
+      this.progressListener({
+        phase,
+        model_id: modelId,
+        detail,
+        elapsed_ms: this.progressStarted ? Date.now() - this.progressStarted : 0,
+        at: new Date().toISOString(),
+      });
+    } catch {
+      // A broken listener must never interrupt a model load.
+    }
   }
 
   private transport(preferUds = false): { protocol: "http" | "https" | "uds"; host: string | null; port: number | null; socket_path: string | null } {
@@ -334,6 +363,8 @@ export class EngineManager {
     };
     this.store.setEngineState(base);
     this.store.audit("engine.start", model.id, `load_mode=${model.load_mode} ttl=${hours ?? "none"}`);
+    this.progressStarted = Date.now();
+    this.emit("loading", model.id, "writing engine state and starting the process");
 
     try {
       const mode = this.serviceMode();
@@ -380,13 +411,16 @@ export class EngineManager {
           };
           this.store.setEngineState(running);
           this.store.audit("engine.running", model.id, `pid=${pid ?? "unknown"}`);
+          this.emit("running", model.id, `healthy after ${Math.round((Date.now() - this.progressStarted) / 1000)}s`);
           return this.status();
         }
         last = health.detail;
+        this.emit("waiting", model.id, health.detail);
         await sleep(1000);
       }
       throw new Error(`engine did not become healthy within 180s: ${last}`);
     } catch (error) {
+      this.emit("error", model.id, (error as Error).message);
       await this.stop();
       this.store.setEngineState({ ...base, status: "error", last_error: (error as Error).message });
       this.store.audit("engine.error", model.id, (error as Error).message);
@@ -396,6 +430,7 @@ export class EngineManager {
 
   async stop(): Promise<EngineState> {
     const state = this.store.engineState();
+    if (state.model_id) this.emit("stopping", state.model_id, "stopping the engine process");
     const mode = this.serviceMode();
     if (mode === "user" || mode === "system") {
       serviceAction(this.os, mode, "stop");
@@ -438,6 +473,8 @@ export class EngineManager {
     });
     this.store.audit("engine.stop", state.model_id ?? "", `pid=${pid ?? "none"}`);
     this.unlock();
+    this.progressStarted = 0;
+    this.emit("stopped", null, "engine stopped");
     return this.status();
   }
 
@@ -445,6 +482,8 @@ export class EngineManager {
     const state = this.store.engineState();
     const target = modelId ?? state.model_id;
     if (!target) throw new Error("no model selected for reload");
+    this.progressStarted = Date.now();
+    this.emit("reloading", target, "reload requested");
     await this.stop();
     return this.start(target, ttlHours);
   }

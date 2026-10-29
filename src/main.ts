@@ -11,6 +11,7 @@ import { installLlama, ensureTls, tlsSupport, binaryVersion } from "./installer.
 import { writeEngineMcpConfig } from "./mcp/config.ts";
 import { applySeeds } from "./seed.ts";
 import { ensureIdentityFile } from "./identity.ts";
+import { syncSystemPrompt } from "./prompt.ts";
 import { installService, serviceAction, serviceAvailable } from "./service.ts";
 
 function usage(): void {
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
   ensureIdentityFile(cfg.root);
   const store = new Store(cfg.dbFile);
   seedStore(store, cfg, os);
+  syncSystemPrompt(store, cfg);
   const seedReport = applySeeds(store, cfg, os);
   writeEngineMcpConfig(store, cfg);
   const engine = new EngineManager(store, cfg, os);

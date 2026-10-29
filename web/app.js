@@ -10,11 +10,28 @@ const TOKEN_KEY = "lama.admin.token";
 const state = {
   token: sessionStorage.getItem(TOKEN_KEY) || "",
   data: null,
-  audit: [],
   chat: [],
   view: (location.hash || "#dashboard").replace(/^#/, ""),
   headers: {},
   busy: false,
+  chatModel: null,
+  requests: [],
+  logs: [],
+  logSeq: 0,
+  logPaused: false,
+  metrics: null,
+  progress: null,
+  transport: null,
+  transportLoading: false,
+  events: null,
+  reconnectTimer: null,
+  refreshTimer: null,
+  chatAbort: null,
+  liveNode: null,
+  liveReason: null,
+  liveReasonBox: null,
+  liveTools: null,
+  spDirty: false,
 };
 
 /* ---------- tiny DOM helpers ---------- */
@@ -49,8 +66,7 @@ function btn(label, color, act, id) {
 }
 
 function tag(text, color) {
-  const node = el("span", { class: `tag ${color || ""}`.trim(), text });
-  return node;
+  return el("span", { class: `tag ${color || ""}`.trim(), text });
 }
 
 function setText(selector, value) {
@@ -74,15 +90,44 @@ function short(value, limit = 70) {
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
+function slug(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "item";
+}
+
 function fmtTime(value) {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
-function bytes(value) {
+function timeOnly(value) {
   if (!value) return "—";
-  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleTimeString([], { hour12: false });
+}
+
+function fmtBytes(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let index = 0;
+  let current = amount;
+  while (current >= 1024 && index < units.length - 1) {
+    current /= 1024;
+    index += 1;
+  }
+  return `${current.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function duration(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
 
 function fillSelect(select, items, current) {
@@ -98,16 +143,25 @@ function fillSelect(select, items, current) {
 
 function emptyRow(tbody, columns, message) {
   const row = el("tr");
-  const cell = el("td", { class: "muted", text: message, attrs: { colspan: columns } });
-  row.append(cell);
+  row.append(el("td", { class: "muted", text: message, attrs: { colspan: columns } }));
   tbody.append(row);
 }
 
-/* ---------- transport ---------- */
+function setBar(selector, percent) {
+  const node = $(selector);
+  if (!node) return;
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  node.style.width = `${value}%`;
+  node.style.background = value >= 90 ? "var(--red)" : value >= 75 ? "var(--amber)" : "var(--green)";
+}
+
+/* ---------- auth + transport ---------- */
 
 function lock(message) {
   state.token = "";
   sessionStorage.removeItem(TOKEN_KEY);
+  disconnectEvents();
+  setLive(false, "Events off");
   $("#authGate").hidden = false;
   $("#authError").textContent = message || "";
   const input = $("#authToken");
@@ -117,6 +171,7 @@ function lock(message) {
 function unlock() {
   $("#authGate").hidden = true;
   $("#authError").textContent = "";
+  ensureEvents();
 }
 
 async function api(path, options = {}) {
@@ -144,6 +199,16 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function fetchText(path) {
+  const response = await fetch(path, { headers: { authorization: `Bearer ${state.token}`, accept: "text/plain" } });
+  if (response.status === 401) {
+    lock("Admin token rejected.");
+    throw new Error("401 invalid admin token");
+  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.text();
+}
+
 let toastTimer = null;
 function toast(message, bad = false) {
   const node = $("#toast");
@@ -154,14 +219,25 @@ function toast(message, bad = false) {
   toastTimer = setTimeout(() => node.classList.remove("show"), 4500);
 }
 
+let refreshTimer = null;
+function deferredRefresh(delay = 1500) {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    if (!state.token) return;
+    loadState({ quiet: true }).catch(() => {});
+  }, delay);
+}
+
 /* ---------- state loading ---------- */
 
 async function loadState({ quiet = false } = {}) {
   const data = await api("/api/state");
   state.data = data;
-  state.audit = Array.isArray(data.audit) ? data.audit : [];
+  state.metrics = data.metrics || state.metrics;
+  if (state.view !== "logs") state.requests = Array.isArray(data.logs?.requests) ? data.logs.requests : [];
   unlock();
   renderChrome();
+  renderMetrics();
   renderView(state.view);
   if (!quiet) toast("State refreshed");
 }
@@ -192,6 +268,7 @@ function renderChrome() {
 function renderView(name) {
   const renderers = {
     dashboard: renderOverview,
+    logs: renderLogsView,
     models: renderModels,
     chat: renderChatView,
     runtime: renderRuntime,
@@ -205,21 +282,257 @@ function renderView(name) {
   render();
 }
 
-/* ---------- views ---------- */
+/* ---------- server-sent events ---------- */
+
+function setLive(alive, label) {
+  const pill = $("#livePill");
+  if (!pill) return;
+  let labelNode = $("#liveLabel");
+  if (!labelNode) {
+    pill.textContent = "";
+    pill.append(el("span", { class: "dot" }));
+    labelNode = el("span", { id: "liveLabel" });
+    pill.append(labelNode);
+  }
+  labelNode.textContent = ` ${label}`;
+  pill.setAttribute(
+    "style",
+    alive ? "color:#65e69a;border-color:#17472d;background:#0c2115" : "color:#9aa6ad;border-color:#343b40;background:#1b2023",
+  );
+  const tagNode = $("#logLive");
+  if (tagNode) {
+    tagNode.textContent = alive ? "SSE LIVE" : "SSE OFFLINE";
+    tagNode.className = `tag ${alive ? "green" : "red"}`;
+  }
+}
+
+function disconnectEvents() {
+  if (state.events) {
+    state.events.abort();
+    state.events = null;
+  }
+  if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+}
+
+function ensureEvents() {
+  if (!state.token) return;
+  if (state.events && !state.events.signal.aborted) return;
+  disconnectEvents();
+  const controller = new AbortController();
+  state.events = controller;
+  void streamEvents(controller);
+}
+
+async function streamEvents(controller) {
+  try {
+    const response = await fetch("/api/events", {
+      headers: { authorization: `Bearer ${state.token}`, accept: "text/event-stream" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (response.status === 401) {
+      lock("Admin token rejected. Paste the current LAMA_ADMIN_TOKEN.");
+      return;
+    }
+    if (!response.ok || !response.body) throw new Error(`events HTTP ${response.status}`);
+    setLive(true, "Events live");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index = buffer.indexOf("\n\n");
+      while (index >= 0) {
+        const block = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        handleEventBlock(block);
+        index = buffer.indexOf("\n\n");
+      }
+    }
+    setLive(false, "Events ended");
+  } catch {
+    if (controller.signal.aborted) return;
+    setLive(false, "Events offline");
+  }
+  if (!controller.signal.aborted && state.token) {
+    state.reconnectTimer = setTimeout(ensureEvents, 4000);
+  }
+}
+
+function handleEventBlock(block) {
+  let event = "message";
+  const data = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith(":")) continue;
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+  }
+  if (!data.length) return;
+  let payload;
+  try {
+    payload = JSON.parse(data.join("\n"));
+  } catch {
+    payload = { text: data.join("\n") };
+  }
+  onEvent(event, payload);
+}
+
+function onEvent(event, payload) {
+  if (event === "hello") {
+    setLive(true, `Events live · ${payload.clients ?? 1}`);
+    return;
+  }
+  if (event === "ping") return;
+  if (event === "metrics") {
+    state.metrics = payload;
+    renderMetrics();
+    return;
+  }
+  if (event === "engine") {
+    state.progress = payload;
+    pushLog({ kind: "engine", at: payload.at, text: `${payload.phase} · ${payload.model_id || "no model"} · ${payload.detail || ""}` });
+    if (["running", "stopped", "error"].includes(payload.phase)) deferredRefresh(900);
+    if (state.view === "runtime") renderRuntime();
+    return;
+  }
+  if (event === "audit") {
+    pushLog({
+      kind: "audit",
+      at: payload.at,
+      text: `${payload.actor || "system"} · ${payload.action || ""}${payload.target ? ` · ${payload.target}` : ""}${payload.detail ? ` · ${payload.detail}` : ""}`,
+    });
+    return;
+  }
+  if (event === "request") {
+    state.requests.unshift(payload);
+    if (state.requests.length > 300) state.requests.length = 300;
+    const tokens = [payload.prompt_tokens, payload.completion_tokens].filter((value) => value !== null && value !== undefined).join("/");
+    pushLog({
+      kind: "request",
+      at: payload.at,
+      text: `${payload.status} · ${payload.model_key || payload.model_id || "—"} · ${payload.protocol}/${payload.transport_id || "—"} · ${payload.stream ? "stream" : "buffered"} · ${payload.duration_ms} ms${tokens ? ` · tokens ${tokens}` : ""}${payload.detail ? ` · ${payload.detail}` : ""}`,
+    });
+    if (state.view === "logs") renderRequestsTable();
+    deferredRefresh(2000);
+    return;
+  }
+  if (event === "tool") {
+    pushLog({
+      kind: "tool",
+      at: payload.at,
+      text: `${payload.tool} · ${payload.ok ? "ok" : "failed"} · ${payload.duration_ms} ms${payload.detail ? ` · ${payload.detail}` : ""}`,
+    });
+    deferredRefresh(1500);
+    return;
+  }
+  if (event === "mcp") {
+    pushLog({ kind: "mcp", at: new Date().toISOString(), text: `${payload.name || payload.id} · ${payload.status || "unknown"}${payload.last_probe_detail ? ` · ${payload.last_probe_detail}` : ""}` });
+    deferredRefresh(1200);
+  }
+}
+
+function pushLog(entry) {
+  entry.id = ++state.logSeq;
+  entry.at = entry.at || new Date().toISOString();
+  state.logs.push(entry);
+  if (state.logs.length > 800) state.logs.splice(0, state.logs.length - 800);
+  $("#navLogCount").textContent = String(state.logs.length);
+  if (state.view === "logs" && !state.logPaused && matchesLogFilter(entry)) {
+    const box = $("#logStream");
+    const placeholder = box.querySelector(".muted");
+    if (placeholder) box.textContent = "";
+    box.append(logLine(entry));
+    while (box.children.length > 400) box.firstElementChild.remove();
+    box.scrollTop = box.scrollHeight;
+    $("#logCount").textContent = String(state.logs.length);
+    $("#logStatus").textContent = `Last event ${timeOnly(entry.at)} · ${state.logs.length} buffered`;
+  }
+}
+
+function logLine(entry) {
+  const row = el("div", { class: `log-line ${entry.kind}` });
+  row.append(
+    el("span", { class: "log-time", text: timeOnly(entry.at) }),
+    el("span", { class: "log-kind", text: entry.kind }),
+    el("span", { class: "log-text", text: entry.text }),
+  );
+  return row;
+}
+
+function matchesLogFilter(entry) {
+  const kind = $("#logKind").value || "all";
+  const query = ($("#logSearch").value || "").trim().toLowerCase();
+  if (kind !== "all" && entry.kind !== kind) return false;
+  return !query || String(entry.text).toLowerCase().includes(query);
+}
+
+/* ---------- metrics ---------- */
+
+function renderMetrics() {
+  const metrics = state.metrics;
+  if (!metrics) return;
+  const memory = metrics.memory || {};
+  const cpu = metrics.cpu || {};
+  const disk = metrics.disk || {};
+  const engine = metrics.engine;
+
+  setText("#ovCpu", `${cpu.percent ?? 0}% · ${cpu.cores ?? "?"} cores`);
+  setBar("#ovCpuBar", cpu.percent);
+  setText("#ovMem", `${fmtBytes(memory.used)} / ${fmtBytes(memory.total)} · ${memory.percent ?? 0}%`);
+  setBar("#ovMemBar", memory.percent);
+  setText("#ovRss", engine ? `${fmtBytes(engine.rss)} · ${engine.cpu_percent ?? 0}% cpu` : "engine not running");
+  setText("#ovDisk", `${fmtBytes(disk.used)} / ${fmtBytes(disk.total)} · ${disk.percent ?? 0}%`);
+  setText("#ovLoad", `${cpu.load1 ?? "—"} / ${cpu.load5 ?? "—"} / ${cpu.load15 ?? "—"}`);
+  setText("#metricStamp", timeOnly(metrics.at));
+
+  setText("#rtCpu", `${cpu.percent ?? 0}% · load ${cpu.load1 ?? "—"}`);
+  setBar("#rtCpuBar", cpu.percent);
+  setText("#rtMem", `${fmtBytes(memory.used)} / ${fmtBytes(memory.total)} · ${memory.percent ?? 0}%`);
+  setBar("#rtMemBar", memory.percent);
+  setText("#rtSwap", `${fmtBytes(memory.swap_used)} / ${fmtBytes(memory.swap_total)} · ${memory.swap_percent ?? 0}%`);
+  setText("#rtDisk", `${fmtBytes(disk.used)} / ${fmtBytes(disk.total)} · ${disk.percent ?? 0}%`);
+  setText("#rtEngineCpu", engine ? `${engine.cpu_percent ?? 0}%` : "—");
+  setText("#rtThreads", engine ? engine.threads ?? "—" : "—");
+  setText("#rtUptime", engine ? duration(engine.uptime_s) : "—");
+  setText("#rtAdminRss", metrics.process ? fmtBytes(metrics.process.rss) : "—");
+  setText("#rtLoadAvg", `${cpu.load1 ?? "—"} / ${cpu.load5 ?? "—"} / ${cpu.load15 ?? "—"}`);
+  setText("#rtMetricStamp", timeOnly(metrics.at));
+
+  if (state.progress) renderProgress();
+}
+
+/* ---------- overview ---------- */
+
+function requestTotals(models) {
+  return models.reduce(
+    (acc, model) => {
+      const stats = model.stats || {};
+      acc.total += stats.total || 0;
+      acc.ok += stats.ok || 0;
+      acc.failed += stats.failed || 0;
+      return acc;
+    },
+    { total: 0, ok: 0, failed: 0 },
+  );
+}
 
 function renderOverview() {
   const data = state.data;
   const engine = data.engine || {};
   const loaded = data.models.find((model) => model.id === engine.model_id);
+  const totals = requestTotals(data.models);
 
   setText("#statModels", data.models.length);
   setText("#statModelsNote", `${data.models.filter((model) => model.enabled).length} enabled · registry`);
+  setText("#statRequests", totals.total);
+  setText("#statRequestsNote", `${totals.ok} ok · ${totals.failed} failed`);
   setTag("#statEngine", engine.status, engine.status === "running" ? "green" : engine.status === "error" ? "red" : "amber");
   setText("#statEngineNote", engine.pid ? `pid ${engine.pid} · ${data.config.engine_url}` : "engine idle");
   setText("#statLoaded", loaded ? loaded.name : "none");
   setText("#statLoadedNote", engine.expires_at ? `expires ${fmtTime(engine.expires_at)}` : engine.model_id ? "no expiry" : "nothing loaded");
-  setText("#statRegistry", `${data.mcp.length} · ${data.transports.length} · ${data.documents.length}`);
-  setText("#statRegistryNote", "mcp · transports · documents");
 
   setTag("#dashMode", engine.status === "running" ? "ENGINE UP" : "ENGINE IDLE", engine.status === "running" ? "green" : "amber");
   setText("#dashEngine", data.config.engine_url);
@@ -231,39 +544,65 @@ function renderOverview() {
   setText("#dashService", data.config.service_mode);
   setText("#dashIdentity", `${data.identity.name} ${data.identity.version}`);
   setText("#lastUpdate", new Date().toLocaleTimeString());
-
-  renderActivityRows();
+  renderMetrics();
 }
 
-function renderActivityRows() {
-  const tbody = $("#activityTable");
-  tbody.textContent = "";
-  const query = ($("#activitySearch").value || "").trim().toLowerCase();
-  const rows = state.audit.filter((row) =>
-    !query || [row.action, row.target, row.actor, row.detail].some((value) => String(value ?? "").toLowerCase().includes(query)),
-  );
-  if (!rows.length) return emptyRow(tbody, 5, query ? "No audit event matches the filter." : "No audit events yet.");
-  for (const row of rows.slice(0, 100)) {
-    const line = el("tr");
-    line.append(
-      el("td", { class: "mono", text: fmtTime(row.at) }),
-      el("td", { text: row.actor || "—" }),
-      el("td", { text: row.action || "—" }),
-      el("td", { class: "mono", text: short(row.target, 42), title: row.target || "" }),
-      el("td", { class: "muted", text: short(row.detail, 90), title: row.detail || "" }),
-    );
-    tbody.append(line);
+/* ---------- logs ---------- */
+
+function renderLogsView() {
+  const box = $("#logStream");
+  box.textContent = "";
+  const rows = state.logs.filter(matchesLogFilter);
+  if (!rows.length) {
+    box.append(el("div", { class: "muted", attrs: { style: "padding:14px" }, text: state.logs.length ? "No event matches this filter." : "No events yet. Actions in this page and requests to /v1/* show up here." }));
+  } else {
+    for (const entry of rows.slice(-400)) box.append(logLine(entry));
+    box.scrollTop = box.scrollHeight;
   }
+  $("#logCount").textContent = String(state.logs.length);
+  $("#navLogCount").textContent = String(state.logs.length);
+  $("#logStatus").textContent = state.logs.length ? `${rows.length} shown · ${state.logs.length} buffered · newest ${timeOnly(state.logs[state.logs.length - 1].at)}` : "Waiting for events…";
+  $("#logPause").textContent = state.logPaused ? "Resume" : "Pause";
+  renderRequestsTable();
 }
+
+function renderRequestsTable() {
+  const tbody = $("#requestTable");
+  if (!tbody) return;
+  tbody.textContent = "";
+  const rows = state.requests || [];
+  if (!rows.length) {
+    emptyRow(tbody, 9, "No request recorded yet. Send one from the Playground or /v1/*.");
+  } else {
+    for (const row of rows.slice(0, 100)) {
+      const tokens = [row.prompt_tokens, row.completion_tokens].filter((value) => value !== null && value !== undefined).join(" / ");
+      const line = el("tr");
+      line.append(
+        el("td", { class: "mono", text: timeOnly(row.at), title: fmtTime(row.at) }),
+        el("td", { class: "mono", text: row.model_key || row.model_id || "—" }),
+        el("td", {}, tag(row.protocol || "—")),
+        el("td", { class: "mono", text: row.transport_id || "—" }),
+        el("td", {}, tag(row.stream ? "stream" : "buffered", row.stream ? "green" : "")),
+        el("td", {}, tag(String(row.status), row.ok ? "green" : "red")),
+        el("td", { class: "mono", text: `${row.duration_ms} ms` }),
+        el("td", { class: "mono", text: tokens || "—" }),
+        el("td", { class: "mono", text: row.system_prompt_id || "—" }),
+      );
+      tbody.append(line);
+    }
+  }
+  const stats = requestTotals((state.data?.models) || []);
+  $("#reqStats").textContent = `${stats.total} total · ${stats.ok} ok · ${stats.failed} failed`;
+}
+
+/* ---------- models ---------- */
 
 function renderModels() {
   const data = state.data;
   const engine = data.engine || {};
-  const provider = $("#modelProviderFilter").value || "all";
   fillSelect(
     $("#modelProviderFilter"),
     [{ value: "all", label: "All providers" }, ...data.providers.map((row) => ({ value: row.id, label: row.name }))],
-    provider,
   );
 
   const query = ($("#modelSearch").value || "").trim().toLowerCase();
@@ -289,6 +628,7 @@ function renderModels() {
 }
 
 function modelCard(model, active) {
+  const stats = model.stats || {};
   const card = el("div", { class: "model-card" });
   const head = el("div", { class: "model-card-head" });
   head.append(
@@ -304,48 +644,63 @@ function modelCard(model, active) {
 
   const tags = el("div", { class: "model-card-tags" });
   tags.append(
+    tag(`provider ${model.provider_id || "—"}`),
     tag(`ctx ${model.context ?? "—"}`),
     tag(`max ${model.max_tokens ?? "—"}`),
     tag(`ttl ${model.ttl_hours ? `${model.ttl_hours}h` : "none"}`),
     tag(`mode ${model.load_mode}`),
   );
 
-  const stats = el("div", { class: "model-card-stats" });
+  const statGrid = el("div", { class: "model-card-stats" });
   for (const [label, value] of [
-    ["MODEL ID", model.model_id],
-    ["QUANT", model.quant || "—"],
-    ["LOAD MODE", model.load_mode],
-    ["TTL", model.ttl_hours ? `${model.ttl_hours} h` : "none"],
+    ["ALIAS", model.model_id],
+    ["REQUESTS", stats.total ?? 0],
+    ["OK / FAILED", `${stats.ok ?? 0} / ${stats.failed ?? 0}`],
+    ["AVG LATENCY", `${stats.avg_ms ?? 0} ms`],
   ]) {
-    stats.append(el("div", { class: "model-card-stat" }, el("span", { text: label }), el("strong", { text: value })));
+    statGrid.append(el("div", { class: "model-card-stat" }, el("span", { text: label }), el("strong", { text: value })));
   }
 
   const actions = el("div", { class: "model-card-actions" });
-  const load = btn(active ? "Reload" : "Load", "green", active ? "model-reload" : "model-load", model.id);
-  actions.append(load, btn("Edit", "", "model-edit", model.id), btn("Delete", "danger", "model-delete", model.id));
+  actions.append(
+    btn(active ? "Reload" : "Load", "green", active ? "model-reload" : "model-load", model.id),
+    btn("Edit", "", "model-edit", model.id),
+    btn("Delete", "danger", "model-delete", model.id),
+  );
   if (active) actions.lastChild.disabled = true;
 
-  card.append(head, tags, stats, actions);
+  card.append(head, tags, statGrid, actions);
+  if (stats.last_at) card.append(el("div", { class: "model-card-meta", text: `last request ${fmtTime(stats.last_at)}` }));
   return card;
 }
 
+/* ---------- chat ---------- */
+
 function renderChatView() {
   const data = state.data;
+  const models = data.models.map((model) => ({ value: model.id, label: `${model.name} · ${model.model_id}` }));
+  fillSelect($("#chatModel"), models, state.chatModel || $("#chatModel").value || models[0]?.value);
+  state.chatModel = $("#chatModel").value;
+
   fillSelect(
-    $("#chatModel"),
-    data.models.map((model) => ({ value: model.id, label: `${model.name} · ${model.model_id}` })),
+    $("#chatTransport"),
+    data.transports.map((row) => ({
+      value: row.id,
+      label: `${row.name} · ${row.protocol}`,
+    })),
+    $("#chatTransport").value || data.transports.find((row) => row.protocol === "http")?.id || "",
   );
-  const previous = $("#chatSystem").value;
+  const previousSystem = $("#chatSystem").value || "system";
   fillSelect(
     $("#chatSystem"),
-    [{ value: "", label: "None" }, ...data.prompts.map((prompt) => ({ value: prompt.id, label: `${prompt.name} v${prompt.version}` }))],
-    previous,
+    [{ value: "", label: "None" }, ...data.prompts.map((prompt) => ({ value: prompt.id, label: `${prompt.name} v${prompt.version}${prompt.edited ? " · edited" : ""}` }))],
+    previousSystem,
   );
+
   const model = data.models.find((row) => row.id === $("#chatModel").value);
-  // Only reset the knobs when the selected model actually changes; auto refresh must not
-  // overwrite values the user typed.
-  if (model && state.chatModel !== model.id) {
-    state.chatModel = model.id;
+  if (model && state.chatModel !== model.id) state.chatModel = model.id;
+  if (model && !state.chatTouched) {
+    state.chatTouched = true;
     $("#chatTemperature").value = model.temperature;
     $("#chatMaxTokens").value = model.max_tokens;
   }
@@ -366,9 +721,233 @@ function renderChatTranscript() {
     );
     return;
   }
-  for (const message of state.chat) box.append(el("div", { class: `chat-msg ${message.role}`, text: message.content }));
+  for (const message of state.chat) {
+    const wrap = el("div", { class: `chat-msg ${message.role}` });
+    if (message.role === "assistant") {
+      const reasoning = el("details", { class: "reasoning" });
+      reasoning.hidden = !message.reasoning;
+      reasoning.append(el("summary", { text: "Reasoning" }), el("div", { class: "reasoning-body", text: message.reasoning || "" }));
+      wrap.append(reasoning);
+    }
+    const body = el("div", { class: "chat-body" });
+    if (message.streaming && !message.content) {
+      body.classList.add("typing");
+      body.textContent = "…";
+    } else {
+      body.textContent = message.content || (message.role === "assistant" ? "(no text content)" : "");
+    }
+    wrap.append(body);
+    if (message.tools && message.tools.length) {
+      const list = el("div", { class: "chip-list", attrs: { style: "margin-top:8px" } });
+      for (const call of message.tools) list.append(tag(toolName(call), "amber"));
+      wrap.append(list);
+    }
+    if (message.meta) wrap.append(el("div", { class: "chat-foot", text: message.meta }));
+    box.append(wrap);
+  }
   box.scrollTop = box.scrollHeight;
 }
+
+function toolName(call) {
+  if (!call || typeof call !== "object") return "tool";
+  const record = Array.isArray(call) ? call[0] : call;
+  return record?.function?.name || record?.name || record?.type || "tool";
+}
+
+function bindLiveChatNodes() {
+  const nodes = $$(".chat-msg.assistant", $("#chatTranscript"));
+  const wrap = nodes[nodes.length - 1];
+  state.liveNode = wrap ? wrap.querySelector(".chat-body") : null;
+  state.liveReasonBox = wrap ? wrap.querySelector(".reasoning") : null;
+  state.liveReason = wrap ? wrap.querySelector(".reasoning-body") : null;
+  state.liveTools = wrap ? wrap.querySelector(".chip-list") : null;
+}
+
+async function readSse(response, onEvent) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index = buffer.indexOf("\n\n");
+    while (index >= 0) {
+      const block = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      let event = "message";
+      const data = [];
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+      }
+      if (data.length) {
+        let payload;
+        try {
+          payload = JSON.parse(data.join("\n"));
+        } catch {
+          payload = { text: data.join("\n") };
+        }
+        onEvent(event, payload);
+      }
+      index = buffer.indexOf("\n\n");
+    }
+  }
+}
+
+async function sendChat() {
+  if (state.busy) return;
+  const data = state.data;
+  if (!data) return toast("Not connected yet", true);
+  const model = data.models.find((row) => row.id === $("#chatModel").value) || data.models[0];
+  if (!model) return toast("Register a model first", true);
+  const text = $("#chatPrompt").value.trim();
+  if (!text) return;
+
+  const protocol = $("#chatProtocol").value || "openai";
+  const transportId = $("#chatTransport").value;
+  const stream = $("#chatStream").checked;
+  const includeTools = $("#chatTools").checked;
+  const systemPromptId = $("#chatSystem").value;
+  const messages = state.chat
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .map((message) => ({ role: message.role, content: message.content }))
+    .filter((message) => message.content);
+  messages.push({ role: "user", content: text });
+
+  state.chat.push({ role: "user", content: text });
+  const assistant = { role: "assistant", content: "", reasoning: "", tools: [], streaming: stream };
+  state.chat.push(assistant);
+  $("#chatPrompt").value = "";
+  renderChatTranscript();
+  bindLiveChatNodes();
+
+  state.busy = true;
+  $("#chatSend").disabled = true;
+  $("#chatStop").hidden = !stream;
+  setTag("#chatBadge", stream ? "STREAMING" : "SENDING", "amber");
+  $("#chatStatus").textContent = "Waiting for the engine…";
+  $("#chatMeta").textContent = "";
+  const started = performance.now();
+  const controller = new AbortController();
+  state.chatAbort = controller;
+
+  const append = (node, value) => {
+    if (!node) return;
+    node.classList.remove("typing");
+    node.textContent += value;
+    const box = $("#chatTranscript");
+    box.scrollTop = box.scrollHeight;
+  };
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${state.token}` },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: model.model_id,
+        protocol,
+        transport_id: transportId,
+        stream,
+        include_tools: includeTools,
+        system_prompt_id: systemPromptId || "none",
+        temperature: Number($("#chatTemperature").value),
+        max_tokens: Number($("#chatMaxTokens").value),
+        messages,
+      }),
+    });
+    if (response.status === 401) {
+      lock("Admin token rejected.");
+      throw new Error("401 invalid admin token");
+    }
+    if (!response.ok) {
+      const raw = await response.text();
+      let detail = raw;
+      try {
+        detail = JSON.parse(raw).error || raw;
+      } catch {
+        // keep raw text
+      }
+      throw new Error(detail || `HTTP ${response.status}`);
+    }
+
+    if (!stream) {
+      const payload = await response.json();
+      assistant.content = payload.content || "";
+      assistant.reasoning = payload.reasoning || "";
+      assistant.tools = payload.tool_calls || [];
+      assistant.streaming = false;
+      const usage = payload.usage || {};
+      const ms = payload.duration_ms ?? Math.round(performance.now() - started);
+      assistant.meta = `${payload.protocol} · ${payload.transport} · HTTP ${payload.status} · ${ms} ms · prompt ${usage.prompt_tokens ?? usage.input_tokens ?? "—"} · completion ${usage.completion_tokens ?? usage.output_tokens ?? "—"}`;
+      renderChatTranscript();
+      setTag("#chatBadge", payload.ok ? "LIVE" : "FAILED", payload.ok ? "green" : "red");
+      $("#chatStatus").textContent = `${payload.protocol} · ${payload.transport} · ${ms} ms`;
+      renderChatMeta(assistant.meta);
+      return;
+    }
+
+    let streamError = null;
+    let doneInfo = null;
+    await readSse(response, (event, payload) => {
+      if (event === "start") {
+        $("#chatStatus").textContent = `Streaming over ${payload.transport} · ${payload.protocol}`;
+      } else if (event === "delta") {
+        assistant.content += payload.text || "";
+        append(state.liveNode, payload.text || "");
+      } else if (event === "reasoning") {
+        assistant.reasoning += payload.text || "";
+        if (state.liveReasonBox) state.liveReasonBox.hidden = false;
+        append(state.liveReason, payload.text || "");
+      } else if (event === "tool") {
+        assistant.tools.push(payload);
+        if (state.liveTools) {
+          state.liveTools.append(tag(toolName(payload), "amber"));
+        }
+      } else if (event === "usage") {
+        assistant.usage = payload;
+      } else if (event === "done") {
+        doneInfo = payload;
+      } else if (event === "error") {
+        streamError = payload.message || `engine HTTP ${payload.status ?? "error"}`;
+      }
+    });
+
+    assistant.streaming = false;
+    if (!assistant.content && assistant.reasoning) assistant.content = "";
+    if (streamError) throw new Error(streamError);
+    if (controller.signal.aborted) throw new Error("stopped by user");
+    const info = doneInfo || {};
+    assistant.meta = `${protocol} · ${transportId} · ${info.duration_ms ?? Math.round(performance.now() - started)} ms · first token ${info.first_token_ms ?? "—"} ms · prompt ${info.prompt_tokens ?? "—"} · completion ${info.completion_tokens ?? "—"}`;
+    renderChatTranscript();
+    setTag("#chatBadge", "LIVE", "green");
+    $("#chatStatus").textContent = `Done over ${transportId} in ${info.duration_ms ?? Math.round(performance.now() - started)} ms`;
+    renderChatMeta(assistant.meta);
+  } catch (error) {
+    assistant.streaming = false;
+    const aborted = controller.signal.aborted || /aborted/i.test(error.message);
+    if (!assistant.content) assistant.content = aborted ? "(stopped)" : "";
+    assistant.meta = aborted ? "stopped by user" : `error: ${error.message}`;
+    renderChatTranscript();
+    setTag("#chatBadge", aborted ? "STOPPED" : "FAILED", aborted ? "amber" : "red");
+    $("#chatStatus").textContent = aborted ? "Stream stopped" : error.message;
+    if (!aborted) toast(error.message, true);
+  } finally {
+    state.busy = false;
+    state.chatAbort = null;
+    $("#chatSend").disabled = false;
+    $("#chatStop").hidden = true;
+  }
+}
+
+function renderChatMeta(text) {
+  const meta = $("#chatMeta");
+  meta.textContent = "";
+  for (const part of String(text || "").split(" · ")) if (part) meta.append(tag(part));
+}
+
+/* ---------- runtime ---------- */
 
 function renderRuntime() {
   const data = state.data;
@@ -387,9 +966,9 @@ function renderRuntime() {
   setText("#runtimeLoadMode", `load mode ${engine.load_mode || "—"}`);
   setText("#runtimeExpires", engine.expires_at ? fmtTime(engine.expires_at) : "no expiry");
   setText("#runtimeStarted", engine.started_at ? `started ${fmtTime(engine.started_at)}` : "not started");
-  const mmap = engine.mmap;
-  setText("#runtimeMmap", mmap ? (mmap.mapped ? "mapped" : "not mapped") : "—");
-  setText("#runtimeMmapNote", mmap ? `${mmap.detail}${mmap.perms ? ` · ${mmap.perms}` : ""}${mmap.bytes ? ` · ${bytes(mmap.bytes)}` : ""}` : "/proc/<pid>/maps");
+  const engineMetrics = state.metrics?.engine;
+  setText("#runtimeRss", engineMetrics ? fmtBytes(engineMetrics.rss) : "—");
+  setText("#runtimeRssNote", engineMetrics ? `${engineMetrics.threads ?? "?"} threads · ${engineMetrics.cpu_percent ?? 0}% cpu` : "/proc/<pid>/stat");
 
   setText("#rtSocket", engine.socket_path || data.config.uds_path || "disabled");
   setText("#rtPort", engine.port || "—");
@@ -398,27 +977,62 @@ function renderRuntime() {
   setText("#rtProvider", provider ? `${provider.name} · ${provider.base_url}` : "—");
   setText("#rtError", engine.last_error || "none");
   $("#rtRaw").textContent = JSON.stringify(engine, null, 2);
+
+  renderProgress();
+  renderMetrics();
 }
+
+function renderProgress() {
+  const box = $("#progressBox");
+  if (!box) return;
+  const progress = state.progress;
+  if (!progress) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const phases = {
+    loading: ["LOADING", 20, "amber"],
+    waiting: ["WAITING", 55, "amber"],
+    running: ["RUNNING", 100, "green"],
+    stopping: ["STOPPING", 70, "amber"],
+    stopped: ["STOPPED", 100, ""],
+    reloading: ["RELOADING", 15, "amber"],
+    error: ["ERROR", 100, "red"],
+  };
+  const [label, percent, color] = phases[progress.phase] || [String(progress.phase || "—"), 40, "amber"];
+  const phaseTag = $("#progressPhase");
+  phaseTag.textContent = label;
+  phaseTag.className = `tag ${color}`.trim();
+  $("#progressDetail").textContent = `${progress.model_id || "no model"} · ${progress.detail || "—"}`;
+  const bar = $("#progressBar");
+  bar.style.width = `${percent}%`;
+  bar.style.background = progress.phase === "error" ? "var(--red)" : progress.phase === "running" ? "var(--green)" : "var(--amber)";
+  $("#progressElapsed").textContent = progress.elapsed_ms ? `${(progress.elapsed_ms / 1000).toFixed(1)} s since the transition started` : "—";
+}
+
+/* ---------- transports ---------- */
 
 function renderTransports() {
   const data = state.data;
-  const transports = $("#transportsTable");
-  transports.textContent = "";
-  if (!data.transports.length) emptyRow(transports, 5, "No transport registered.");
+  const tbody = $("#transportsTable");
+  tbody.textContent = "";
+  if (!data.transports.length) emptyRow(tbody, 5, "No transport registered.");
   for (const row of data.transports) {
     const endpoint = row.protocol === "uds" ? row.socket_path : `${row.protocol}://${row.host}:${row.port}`;
+    const stats = row.stats || {};
     const actions = el("div", { class: "admin-table-actions" });
-    actions.append(btn("Probe", "", "transport-probe", row.id));
+    actions.append(btn("Open", "green", "transport-open", row.id), btn("Probe", "", "transport-probe", row.id));
     if (row.protocol === "uds") actions.append(btn("Link socket", "", "transport-link", row.id));
     const line = el("tr");
     line.append(
       el("td", { class: "mono", text: row.id }),
       el("td", {}, tag(row.protocol, row.protocol === "https" ? "green" : "")),
       el("td", { class: "mono", text: endpoint || "—", title: endpoint || "" }),
-      el("td", { class: "muted", text: short(row.gateway_hint, 80), title: row.gateway_hint || "" }),
+      el("td", { class: "mono", text: `${stats.total ?? 0} · ${stats.ok ?? 0}/${stats.failed ?? 0}` }),
       el("td", {}, actions),
     );
-    transports.append(line);
+    tbody.append(line);
   }
 
   const documents = $("#documentsTable");
@@ -437,28 +1051,158 @@ function renderTransports() {
     );
     documents.append(line);
   }
+
+  if (state.transport) void openTransport(state.transport, { silent: true });
 }
+
+async function openTransport(id, { silent = false } = {}) {
+  if (state.transportLoading) return;
+  state.transportLoading = true;
+  state.transport = id;
+  try {
+    const [detail, docs] = await Promise.all([api(`/api/transports/${encodeURIComponent(id)}`), api(`/api/transports/${encodeURIComponent(id)}/docs`)]);
+    const transport = detail.transport;
+    const endpoint = transport.protocol === "uds" ? transport.socket_path : `${transport.protocol}://${transport.host}:${transport.port}`;
+    $("#transportDetail").hidden = false;
+    $("#tdTitle").textContent = `${transport.name} · ${transport.protocol}`;
+    $("#tdMeta").textContent = endpoint || "—";
+    $("#tdStats").textContent = `${detail.stats.total} req · ${detail.stats.ok} ok · ${detail.stats.failed} failed · ${detail.stats.avg_ms} ms avg`;
+    $("#tdLink").hidden = transport.protocol !== "uds";
+    renderDocs($("#tdDocs"), docs);
+    const tbody = $("#tdRequests");
+    tbody.textContent = "";
+    if (!detail.requests.length) emptyRow(tbody, 8, "No request recorded for this transport yet.");
+    for (const row of detail.requests) {
+      const tokens = [row.prompt_tokens, row.completion_tokens].filter((value) => value !== null && value !== undefined).join(" / ");
+      const line = el("tr");
+      line.append(
+        el("td", { class: "mono", text: timeOnly(row.at) }),
+        el("td", { class: "mono", text: row.model_key || "—" }),
+        el("td", {}, tag(row.protocol)),
+        el("td", {}, tag(row.stream ? "stream" : "buffered", row.stream ? "green" : "")),
+        el("td", {}, tag(String(row.status), row.ok ? "green" : "red")),
+        el("td", { class: "mono", text: `${row.duration_ms} ms` }),
+        el("td", { class: "mono", text: tokens || "—" }),
+        el("td", { class: "muted", text: short(row.detail, 50), title: row.detail || "" }),
+      );
+      tbody.append(line);
+    }
+    if (!silent) toast(`transport ${id} opened`);
+  } catch (error) {
+    if (!silent) toast(error.message, true);
+  } finally {
+    state.transportLoading = false;
+  }
+}
+
+function renderDocs(container, docs) {
+  container.textContent = "";
+  const head = el("div", { class: "doc-head" });
+  head.append(
+    el("div", { class: "doc-title", text: `${docs.transport.name} integration guide` }),
+    el("div", { class: "sub", text: `Endpoint ${docs.transport.endpoint} · model alias ${docs.model_alias} · generated ${fmtTime(docs.generated_at)}` }),
+  );
+  container.append(head);
+  for (const section of docs.sections || []) {
+    const block = el("section", { class: "doc-section" });
+    block.append(el("h3", { text: section.title }), el("p", { class: "doc-summary", text: section.summary }));
+    for (const item of section.blocks || []) {
+      if (item.kind === "table") {
+        const table = el("table", { class: "doc-table" });
+        const thead = el("thead");
+        const headRow = el("tr");
+        for (const cell of item.head || []) headRow.append(el("th", { text: cell }));
+        thead.append(headRow);
+        const tbody = el("tbody");
+        for (const row of item.rows || []) {
+          const line = el("tr");
+          for (const cell of row) line.append(el("td", { class: "mono", text: cell }));
+          tbody.append(line);
+        }
+        table.append(thead, tbody);
+        block.append(table);
+      } else if (item.kind === "note") {
+        block.append(el("div", { class: "doc-note", text: item.text || "" }));
+      } else if (item.kind === "code") {
+        block.append(codeBlock(item));
+      } else if (item.text) {
+        block.append(el("p", { class: "doc-text", text: item.text }));
+      }
+    }
+    container.append(block);
+  }
+}
+
+function codeBlock(item) {
+  const wrap = el("div", { class: "doc-code" });
+  const head = el("div", { class: "doc-code-head" });
+  const copy = el("button", { class: "btn small", text: "Copy" });
+  copy.type = "button";
+  copy.addEventListener("click", () => copyText(item.text || "", "snippet"));
+  head.append(el("span", { text: item.title || item.language || "code" }), copy);
+  wrap.append(head, el("pre", { class: "code", text: item.text || "" }));
+  return wrap;
+}
+
+/* ---------- MCP ---------- */
 
 function renderMcp() {
   const data = state.data;
   const tbody = $("#mcpTable");
   tbody.textContent = "";
   $("#mcpCount").textContent = `${data.mcp.length} server(s)`;
-  if (!data.mcp.length) emptyRow(tbody, 6, "No MCP server registered.");
+  if (!data.mcp.length) emptyRow(tbody, 7, "No MCP server registered.");
   for (const row of data.mcp) {
     const target = row.transport === "stdio" ? [row.command, ...(row.args || [])].filter(Boolean).join(" ") : row.url;
+    const statusColor = row.status === "active" ? "green" : row.status === "inactive" ? "red" : "amber";
     const actions = el("div", { class: "admin-table-actions" });
-    actions.append(btn("Probe", "", "mcp-probe", row.id), btn("Delete", "danger", "mcp-delete", row.id));
+    actions.append(
+      btn("Probe", "", "mcp-probe", row.id),
+      btn(row.enabled ? "Disable" : "Enable", row.enabled ? "" : "green", "mcp-toggle", row.id),
+      btn("Delete", "danger", "mcp-delete", row.id),
+    );
+    const targetCell = el("td", { class: "mono" });
+    const info = el("button", { class: "mini", text: "i", title: "Show the full command path" });
+    info.type = "button";
+    info.dataset.act = "mcp-info";
+    const full = el("div", { class: "full mono", text: target || "—" });
+    full.hidden = true;
+    targetCell.append(info, el("span", { class: "mono", text: short(target, 44), title: target || "" }), full);
+
     const line = el("tr");
     line.append(
       el("td", {}, el("div", { class: "item-name", text: row.name }), el("div", { class: "item-sub mono", text: row.id })),
-      el("td", {}, tag(row.transport, row.transport === "stdio" ? "green" : "amber"), row.enabled ? "" : tag("disabled", "red")),
-      el("td", { class: "mono", text: short(target, 70), title: target || "" }),
-      el("td", { class: "muted", text: (row.env_keys || []).join(", ") || "—" }),
-      el("td", { class: "mono", text: `${row.timeout_ms} ms` }),
+      el("td", {}, tag(row.status || "unknown", statusColor), row.enabled ? "" : tag("disabled", "red")),
+      el("td", {}, tag(row.transport, row.transport === "stdio" ? "green" : "amber")),
+      targetCell,
+      el("td", { class: "mono", text: `${row.tools_count ?? 0}` }),
+      el("td", { class: "mono", text: `${row.use_count ?? 0}` }),
       el("td", {}, actions),
     );
     tbody.append(line);
+  }
+
+  const matrix = $("#mcpMatrix");
+  matrix.textContent = "";
+  const rows = [];
+  for (const server of data.mcp) for (const tool of server.tools || []) rows.push({ server, tool });
+  $("#mcpMatrixCount").textContent = `${rows.length} tool(s)`;
+  if (!rows.length) emptyRow(matrix, 7, "No tool advertised yet. Run a probe on the server.");
+  for (const { server, tool } of rows) {
+    const line = el("tr");
+    const toggle = btn(tool.enabled ? "On" : "Off", tool.enabled ? "green" : "", "mcp-tool-toggle", tool.name);
+    toggle.dataset.server = tool.mcp_id;
+    toggle.title = tool.enabled ? "Disable this tool in the playground" : "Enable this tool in the playground";
+    line.append(
+      el("td", { class: "mono", text: tool.name }),
+      el("td", { text: server.name }),
+      el("td", {}, tag(server.status === "active" ? "active" : server.status || "unknown", server.status === "active" ? "green" : "amber")),
+      el("td", {}, toggle),
+      el("td", { class: "mono", text: `${tool.calls ?? 0}` }),
+      el("td", { class: "mono", text: `${tool.ok ?? 0} / ${tool.failed ?? 0}` }),
+      el("td", { class: "muted", text: tool.use_cases || "—" }),
+    );
+    matrix.append(line);
   }
   void loadEngineTools();
 }
@@ -484,24 +1228,62 @@ async function loadEngineTools() {
   }
 }
 
+/* ---------- prompts ---------- */
+
 function renderPrompts() {
+  const data = state.data;
+  const prompt = data.system_prompt || {};
+  if (!state.spDirty) $("#spContent").value = prompt.content || "";
+  $("#spFile").textContent = prompt.file || "prompts/lama-system.md";
+  $("#spMeta").textContent = prompt.exists === false ? "missing" : `v${prompt.version ?? 1}${prompt.edited ? " · edited" : " · from file"}`;
+  $("#spMeta").className = `tag ${prompt.edited ? "amber" : "green"}`;
+  const chars = $("#spContent").value.length;
+  const tokens = Math.round(chars / 4.2);
+  $("#spChars").textContent = `${chars} chars · ~${tokens} prompt tokens · source ${prompt.source || "n/a"} · sha ${short(prompt.source_sha || "—", 16)}`;
+
+  const usage = $("#spUsage");
+  usage.textContent = "";
+  const help = data.prompt_usage || {};
+  for (const [key, value] of Object.entries(help)) {
+    if (key === "summary") continue;
+    usage.append(el("div", {}, el("div", { class: "item-name", text: key }), el("div", { class: "item-sub", text: String(value) })));
+  }
+  usage.prepend(el("p", { class: "doc-note", text: help.summary || "" }));
+
   const tbody = $("#promptsTable");
   tbody.textContent = "";
-  if (!state.data.prompts.length) return emptyRow(tbody, 5, "No prompt stored.");
-  for (const prompt of state.data.prompts) {
+  if (!data.prompts.length) emptyRow(tbody, 6, "No prompt stored.");
+  for (const row of data.prompts) {
     const actions = el("div", { class: "admin-table-actions" });
-    actions.append(btn("View", "", "prompt-view", prompt.id), btn("Use", "green", "prompt-use", prompt.id));
+    actions.append(btn("Open", "", "prompt-open", row.id), btn("Use in chat", "green", "prompt-use", row.id));
     const line = el("tr");
     line.append(
-      el("td", { class: "mono", text: prompt.name }),
-      el("td", { class: "mono", text: `v${prompt.version}` }),
-      el("td", {}, prompt.is_default ? tag("default", "green") : tag("—")),
-      el("td", { class: "muted", text: short(prompt.content, 100), title: prompt.content }),
+      el("td", { class: "mono", text: row.name }),
+      el("td", { class: "mono", text: `v${row.version}` }),
+      el("td", {}, row.is_default ? tag("default", "green") : tag("—")),
+      el("td", { class: "mono", text: `${row.runs ?? 0}` }),
+      el("td", { class: "mono", text: `${row.content.length}` }),
       el("td", {}, actions),
     );
     tbody.append(line);
   }
 }
+
+function promptContentById(id) {
+  return state.data?.prompts.find((row) => row.id === id)?.content ?? "";
+}
+
+async function saveSystemPrompt() {
+  const content = $("#spContent").value.trim();
+  if (!content) return toast("Prompt is empty", true);
+  const saved = await api("/api/system-prompt", { method: "PUT", body: { content } });
+  state.spDirty = false;
+  toast(`system prompt saved as v${saved.version}`);
+  await loadState({ quiet: true });
+  $("#spContent").value = saved.content;
+}
+
+/* ---------- tools ---------- */
 
 async function renderTools() {
   try {
@@ -516,7 +1298,7 @@ async function renderTools() {
           "div",
           {},
           el("div", { class: "item-name mono", text: tool.name }),
-          el("div", { class: "item-sub", text: tool.description || "" }),
+          el("div", { class: "item-sub", text: `${tool.description || ""}${tool.calls ? ` · ${tool.calls} call(s)` : ""}` }),
         ),
       );
     }
@@ -525,6 +1307,8 @@ async function renderTools() {
     toast(`tools: ${error.message}`, true);
   }
 }
+
+/* ---------- settings ---------- */
 
 function renderSettings() {
   const data = state.data;
@@ -542,7 +1326,7 @@ function renderSettings() {
   const identity = data.identity || {};
   const branding = identity.branding || {};
   const contact = identity.contact || {};
-  setText("#identityFile", `${config.root}/identity.json`);
+  $("#identityFile").textContent = `${config.root}/identity.json`;
   setText("#idName", identity.name);
   setText("#idVersion", identity.version);
   setText("#idTagline", identity.tagline || "—");
@@ -615,7 +1399,7 @@ function fieldNode(field) {
   input.className = field.type === "textarea" ? "field mono" : "field";
   if (field.required) input.required = true;
   row.append(input);
-  if (field.hint) row.append(el("p", { class: "sub", text: field.hint, style: "margin-top:5px" }));
+  if (field.hint) row.append(el("p", { class: "sub", text: field.hint, attrs: { style: "margin-top:5px" } }));
   return row;
 }
 
@@ -666,17 +1450,25 @@ function formModal(title, fields, submitLabel, onSubmit) {
   if (first) first.focus();
 }
 
-/* ---------- actions ---------- */
+/* ---------- forms ---------- */
 
 function modelForm(model) {
-  const config = state.data.config;
+  const data = state.data;
+  const config = data.config;
   formModal(
     model ? `Edit ${model.name}` : "Register a GGUF model",
     [
       { name: "id", label: "ID (SLUG)", value: model ? model.id : "", placeholder: "auto from name", hint: "Stable registry id. Keep it to update this row." },
       { name: "name", label: "DISPLAY NAME", value: model ? model.name : "", required: true },
       { name: "path", label: "GGUF PATH (ABSOLUTE)", value: model ? model.path : "", placeholder: `${config.models_dir}/model.gguf`, required: true, full: true },
-      { name: "model_id", label: "MODEL ID (API)", value: model ? model.model_id : "", placeholder: "e.g. qwen2.5-0.5b" },
+      {
+        name: "provider_id",
+        label: "PROVIDER / MAPPING",
+        type: "select",
+        value: model ? model.provider_id : data.providers[0]?.id || "llamacpp",
+        options: data.providers.map((provider) => ({ value: provider.id, label: `${provider.name} · ${provider.base_url}` })),
+      },
+      { name: "model_id", label: "MODEL ID (API ALIAS)", value: model ? model.model_id : "", placeholder: "e.g. qwen2.5-0.5b", hint: "Sent as --alias and as model in API calls." },
       { name: "quant", label: "QUANT", value: model ? model.quant || "" : "", placeholder: "Q4_K_M" },
       { name: "context", label: "CONTEXT", type: "number", value: model ? model.context : 4096, min: 256, step: 256 },
       { name: "max_tokens", label: "MAX TOKENS", type: "number", value: model ? model.max_tokens : 1024, min: 1, step: 1 },
@@ -699,6 +1491,35 @@ function modelForm(model) {
       await loadState({ quiet: true });
     },
   );
+
+  const form = $("#modalForm");
+  const grid = form?.querySelector(".form-grid");
+  if (!grid) return;
+  const row = el("div", { class: "form-row full" });
+  const select = el("select", { class: "field", id: "mf-discover" });
+  row.append(el("label", { text: "DISCOVERED GGUF", attrs: { for: "mf-discover" } }), select);
+  grid.prepend(row);
+  api("/api/models/discover")
+    .then((res) => {
+      fillSelect(select, [
+        { value: "", label: `${res.files.length} GGUF file(s) under ${res.dir}` },
+        ...res.files.map((file) => ({ value: file.file, label: `${file.name}${file.registered ? " (registered)" : ""}` })),
+      ]);
+    })
+    .catch((error) => toast(`discover: ${error.message}`, true));
+  select.addEventListener("change", () => {
+    const file = select.value;
+    if (!file) return;
+    const name = file.split("/").pop().replace(/\.gguf$/i, "");
+    const put = (field, value) => {
+      const input = form.elements.namedItem(field);
+      if (input) input.value = value;
+    };
+    put("name", name);
+    put("path", file);
+    put("model_id", slug(name));
+    if (!model) put("id", slug(name));
+  });
 }
 
 function transportForm() {
@@ -714,13 +1535,7 @@ function transportForm() {
     "Add transport",
     [
       { name: "name", label: "NAME", required: true, placeholder: "HTTP loopback" },
-      {
-        name: "protocol",
-        label: "PROTOCOL",
-        type: "select",
-        value: "http",
-        options: ["http", "https", "uds"].map((value) => ({ value, label: value })),
-      },
+      { name: "protocol", label: "PROTOCOL", type: "select", value: "http", options: ["http", "https", "uds"].map((value) => ({ value, label: value })) },
       { name: "host", label: "HOST", value: "127.0.0.1" },
       { name: "port", label: "PORT", type: "number", value: enginePort, min: 1, max: 65535 },
       { name: "socket_path", label: "SOCKET PATH (UDS)", value: config.uds_path, full: true },
@@ -765,13 +1580,7 @@ function mcpForm() {
     "Add MCP server",
     [
       { name: "name", label: "NAME", required: true, placeholder: "lama-tools" },
-      {
-        name: "transport",
-        label: "TRANSPORT",
-        type: "select",
-        value: "stdio",
-        options: ["stdio", "http", "sse"].map((value) => ({ value, label: value })),
-      },
+      { name: "transport", label: "TRANSPORT", type: "select", value: "stdio", options: ["stdio", "http", "sse"].map((value) => ({ value, label: value })) },
       { name: "command", label: "COMMAND (STDIO)", placeholder: "node" },
       { name: "args", label: "ARGS (JSON ARRAY)", type: "textarea", rows: 3, value: "[]" },
       { name: "url", label: "URL (HTTP/SSE)", full: true, placeholder: "http://127.0.0.1:9000/mcp" },
@@ -811,6 +1620,8 @@ function promptForm() {
   );
 }
 
+/* ---------- shared utils ---------- */
+
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
@@ -825,78 +1636,18 @@ async function copyText(text, label) {
   }
 }
 
-async function sendChat() {
-  if (state.busy) return;
-  const data = state.data;
-  if (!data) return toast("Not connected yet", true);
-  const model = data.models.find((row) => row.id === $("#chatModel").value);
-  if (!model) return toast("Register a model first", true);
-  const text = $("#chatPrompt").value.trim();
-  if (!text) return;
-
-  const messages = [];
-  const systemId = $("#chatSystem").value;
-  if (systemId) {
-    const prompt = data.prompts.find((row) => row.id === systemId);
-    if (prompt) messages.push({ role: "system", content: prompt.content });
-  }
-  for (const message of state.chat) messages.push({ role: message.role, content: message.content });
-  messages.push({ role: "user", content: text });
-
-  state.busy = true;
-  $("#chatSend").disabled = true;
-  setTag("#chatBadge", "SENDING", "amber");
-  $("#chatStatus").textContent = "Waiting for the engine…";
-  const started = performance.now();
-  try {
-    const response = await fetch("/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: model.model_id,
-        temperature: Number($("#chatTemperature").value),
-        max_tokens: Number($("#chatMaxTokens").value),
-        messages,
-      }),
-    });
-    const raw = await response.text();
-    let payload = null;
-    try {
-      payload = raw ? JSON.parse(raw) : null;
-    } catch {
-      payload = null;
-    }
-    if (!response.ok) {
-      const detail = payload && payload.error ? payload.error.message || payload.error : `HTTP ${response.status}`;
-      throw new Error(detail);
-    }
-    const content = payload?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) throw new Error("engine returned no message content");
-    const ms = Math.round(performance.now() - started);
-    state.chat.push({ role: "user", content: text }, { role: "assistant", content });
-    $("#chatPrompt").value = "";
-    renderChatTranscript();
-    setTag("#chatBadge", "LIVE", "green");
-    $("#chatStatus").textContent = `HTTP ${response.status} · ${ms} ms`;
-    $("#chatMeta").textContent = "";
-    const usage = payload.usage || {};
-    for (const [label, value] of [
-      ["model", model.model_id],
-      ["latency", `${ms} ms`],
-      ["prompt", usage.prompt_tokens],
-      ["completion", usage.completion_tokens],
-    ]) {
-      $("#chatMeta").append(tag(`${label} ${value === undefined ? "—" : value}`));
-    }
-  } catch (error) {
-    setTag("#chatBadge", "FAILED", "red");
-    $("#chatStatus").textContent = error.message;
-    toast(error.message, true);
-  } finally {
-    state.busy = false;
-    $("#chatSend").disabled = false;
-  }
+function downloadText(name, text) {
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = el("a", { href: url, attrs: { download: name } });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`${name} downloaded`);
 }
+
+/* ---------- actions ---------- */
 
 const ACTIONS = {
   "model-load": async (id) => {
@@ -917,6 +1668,9 @@ const ACTIONS = {
     await api(`/api/models/${encodeURIComponent(id)}`, { method: "DELETE" });
     await loadState({ quiet: true });
     toast("model deleted");
+  },
+  "transport-open": async (id) => {
+    await openTransport(id);
   },
   "transport-probe": async (id) => {
     const result = await api("/api/transports/probe", { method: "POST", body: { id } });
@@ -960,25 +1714,40 @@ const ACTIONS = {
     toast(`probe: ${result.detail}`);
     await loadState({ quiet: true });
   },
+  "mcp-toggle": async (id) => {
+    const row = state.data.mcp.find((item) => item.id === id);
+    const result = await api(`/api/mcp/${encodeURIComponent(id)}/toggle`, { method: "POST", body: { enabled: !row?.enabled } });
+    toast(`${result.row.name} ${result.row.enabled ? "enabled" : "disabled"}`);
+    await loadState({ quiet: true });
+  },
   "mcp-delete": async (id) => {
     if (!confirm(`Delete MCP server ${id}?`)) return;
     await api(`/api/mcp/${encodeURIComponent(id)}`, { method: "DELETE" });
     await loadState({ quiet: true });
     toast("MCP server deleted");
   },
-  "prompt-view": (id) => {
-    const prompt = state.data.prompts.find((row) => row.id === id);
-    if (!prompt) return;
-    $("#modalTitle").textContent = `${prompt.name} v${prompt.version}`;
-    $("#modalBody").textContent = "";
-    $("#modalBody").append(el("pre", { class: "code", text: prompt.content }));
-    $("#modalFoot").textContent = "";
-    const close = btn("Close", "");
-    const copy = btn("Copy", "green");
-    copy.addEventListener("click", () => copyText(prompt.content, "prompt"));
-    close.addEventListener("click", closeModal);
-    $("#modalFoot").append(close, copy);
-    $("#modalBackdrop").classList.add("open");
+  "mcp-tool-toggle": async (name, node) => {
+    const server = node?.dataset.server;
+    const tool = (state.data.mcp.find((row) => row.id === server)?.tools || []).find((row) => row.name === name);
+    await api(`/api/mcp/tools/${encodeURIComponent(name)}/toggle`, { method: "POST", body: { enabled: !tool?.enabled } });
+    toast(`${name} ${tool?.enabled ? "disabled" : "enabled"}`);
+    await loadState({ quiet: true });
+  },
+  "mcp-info": (id, node) => {
+    const cell = node.closest("td");
+    const full = cell?.querySelector(".full");
+    if (!full) return;
+    full.hidden = !full.hidden;
+    node.textContent = full.hidden ? "i" : "×";
+    node.title = full.hidden ? "Show the full command path" : "Hide the full command path";
+  },
+  "prompt-open": (id) => {
+    const content = promptContentById(id);
+    $("#spContent").value = content;
+    state.spDirty = true;
+    showView("prompts");
+    $("#spContent").scrollIntoView({ block: "center", behavior: "smooth" });
+    toast(`${id} loaded into the editor (save to version it)`);
   },
   "prompt-use": (id) => {
     showView("chat");
@@ -995,7 +1764,7 @@ document.addEventListener("click", async (event) => {
   event.preventDefault();
   node.disabled = true;
   try {
-    await handler(node.dataset.id);
+    await handler(node.dataset.id, node);
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -1024,16 +1793,28 @@ $("#mobileMenu").addEventListener("click", () => $("#sidebar").classList.toggle(
 $("#headerSettings").addEventListener("click", () => showView("settings"));
 $("#headerRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
 $("#refreshAll").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
-$("#activityRefresh").addEventListener("click", async () => {
+
+$("#logPause").addEventListener("click", () => {
+  state.logPaused = !state.logPaused;
+  $("#logPause").textContent = state.logPaused ? "Resume" : "Pause";
+  $("#logStatus").textContent = state.logPaused ? "Paused — events are buffered, not shown" : "Live again";
+});
+$("#logClear").addEventListener("click", () => {
+  state.logs = [];
+  $("#navLogCount").textContent = "0";
+  renderLogsView();
+});
+$("#logKind").addEventListener("change", renderLogsView);
+$("#logSearch").addEventListener("input", renderLogsView);
+$("#reqRefresh").addEventListener("click", async () => {
   try {
-    state.audit = await api("/api/audit?limit=100");
-    renderActivityRows();
-    toast("audit refreshed");
+    state.requests = await api("/api/requests?limit=100");
+    renderRequestsTable();
+    toast("requests refreshed");
   } catch (error) {
     toast(error.message, true);
   }
 });
-$("#activitySearch").addEventListener("input", renderActivityRows);
 
 $("#modelRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
 $("#loadModelTop").addEventListener("click", () => modelForm(null));
@@ -1090,6 +1871,38 @@ $("#rtServiceSave").addEventListener("click", async () => {
 $("#transportRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
 $("#addTransport").addEventListener("click", transportForm);
 $("#addDocument").addEventListener("click", documentForm);
+$("#tdClose").addEventListener("click", () => {
+  state.transport = null;
+  $("#transportDetail").hidden = true;
+});
+$("#tdProbe").addEventListener("click", async () => {
+  if (!state.transport) return;
+  try {
+    const result = await api("/api/transports/probe", { method: "POST", body: { id: state.transport } });
+    toast(`probe: ${result.detail || "done"}`);
+    await loadState({ quiet: true });
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#tdLink").addEventListener("click", async () => {
+  if (!state.transport) return;
+  try {
+    const result = await api(`/api/transports/${encodeURIComponent(state.transport)}/link-socket`, { method: "POST" });
+    toast(`socket linked → ${result.target}`);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#tdDocsTxt").addEventListener("click", async () => {
+  if (!state.transport) return;
+  try {
+    const text = await fetchText(`/api/transports/${encodeURIComponent(state.transport)}/docs.txt`);
+    downloadText(`${state.transport}-integration.md`, text);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
 
 $("#mcpRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
 $("#addMcp").addEventListener("click", mcpForm);
@@ -1114,6 +1927,38 @@ $("#mcpShowConfig").addEventListener("click", async () => {
 
 $("#promptRefresh").addEventListener("click", () => loadState().catch((error) => toast(error.message, true)));
 $("#addPrompt").addEventListener("click", promptForm);
+$("#spSave").addEventListener("click", () => saveSystemPrompt().catch((error) => toast(error.message, true)));
+$("#spSave2").addEventListener("click", () => saveSystemPrompt().catch((error) => toast(error.message, true)));
+$("#spReset").addEventListener("click", async () => {
+  if (!confirm("Reset the managed prompt to prompts/lama-system.md? Local edits are replaced.")) return;
+  try {
+    const saved = await api("/api/system-prompt/reset", { method: "POST" });
+    state.spDirty = false;
+    $("#spContent").value = saved.content;
+    await loadState({ quiet: true });
+    toast("prompt reset to the file");
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#spFileLoad").addEventListener("click", async () => {
+  try {
+    const prompt = await api("/api/system-prompt");
+    if (prompt.file_content === null) return toast("Prompt file is missing", true);
+    $("#spContent").value = prompt.file_content;
+    state.spDirty = true;
+    toast("file copy loaded into the editor (not saved)");
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#spCopy").addEventListener("click", () => copyText($("#spContent").value, "prompt"));
+$("#spDownload").addEventListener("click", () => downloadText("lama-system.md", $("#spContent").value));
+$("#spContent").addEventListener("input", () => {
+  state.spDirty = true;
+  const chars = $("#spContent").value.length;
+  $("#spChars").textContent = `${chars} chars · ~${Math.round(chars / 4.2)} prompt tokens · unsaved edits`;
+});
 
 $("#parseRun").addEventListener("click", async () => {
   try {
@@ -1145,14 +1990,18 @@ $("#callRun").addEventListener("click", async () => {
   }
 });
 
-$("#chatSend").addEventListener("click", sendChat);
+$("#chatSend").addEventListener("click", () => sendChat());
+$("#chatStop").addEventListener("click", () => {
+  if (state.chatAbort) state.chatAbort.abort();
+});
 $("#chatPrompt").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+  if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     void sendChat();
   }
 });
 $("#chatClear").addEventListener("click", () => {
+  if (state.chatAbort) state.chatAbort.abort();
   state.chat = [];
   $("#chatMeta").textContent = "";
   $("#chatStatus").textContent = "No request sent yet";
@@ -1173,13 +2022,9 @@ $("#admConnect").addEventListener("click", async () => {
   if (!value) return toast("Paste the token first", true);
   state.token = value;
   try {
-    const data = await api("/api/state");
+    await loadState({ quiet: true });
     sessionStorage.setItem(TOKEN_KEY, value);
-    state.data = data;
-    state.audit = Array.isArray(data.audit) ? data.audit : [];
     $("#admToken").value = "";
-    renderChrome();
-    renderView(state.view);
     toast("connected");
   } catch (error) {
     state.token = "";
@@ -1199,14 +2044,10 @@ $("#authForm").addEventListener("submit", async (event) => {
   if (!value) return;
   state.token = value;
   try {
-    const data = await api("/api/state");
+    await loadState({ quiet: true });
     sessionStorage.setItem(TOKEN_KEY, value);
-    state.data = data;
-    state.audit = Array.isArray(data.audit) ? data.audit : [];
     $("#authToken").value = "";
     unlock();
-    renderChrome();
-    renderView(state.view);
     toast("connected");
   } catch (error) {
     state.token = "";
@@ -1238,4 +2079,4 @@ setInterval(() => {
   if (document.hidden || state.busy || !state.token) return;
   if ($("#modalBackdrop").classList.contains("open")) return;
   loadState({ quiet: true }).catch(() => {});
-}, 20000);
+}, 30000);

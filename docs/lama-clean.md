@@ -43,6 +43,12 @@ what systemd requires.
 except `GET /` (404): `/api/*`, `/v1/*`, `/health`, `/tools` and the engine keep working. The UI calls
 that same API for every action, so the manager can be driven by curl or another program.
 
+The UI itself is ten views (Overview, Logs, Model List, Playground, Runtime, Transports & Docs, MCP
+Servers, Prompts, Tool Parser, Connection & Auth). Logs is fed by `GET /api/events`, an SSE stream
+that carries audit, request, engine, metrics, MCP and tool frames; polling `/api/state` remains a
+complete fallback. Chat streams from `POST /api/chat` and parses named events (`start`, `delta`,
+`reasoning`, `tool`, `usage`, `done`, `error`).
+
 ## Design
 
 - **One model at a time.** `engine_state` in SQLite is the lock; `data/engine.lock` prevents two
@@ -56,6 +62,14 @@ that same API for every action, so the manager can be driven by curl or another 
 - **Tool fallback is three stages.** Native `tool_calls` → `TOOL:/ARGS:`/`PATH:` markers → bare
   JSON blocks, with a schema-echo guard and mislabel hint. Parsing never executes a tool;
   `/api/tools/call` is a separate audited endpoint. Tool use by the model is never guaranteed.
+- **Telemetry is first-party.** Proxy and playground calls write `request_logs`; MCP tool calls
+  write `tool_usage` and bump `mcp_servers.use_count`. Model List, Logs and the MCP matrix read
+  those rows, so counts are observed traffic through this admin, not estimates.
+- **The prompt is file-first.** `prompts/lama-system.md` is seeded into `system_prompts` on boot.
+  An admin save bumps the version and marks the row `edited`, so boot sync keeps it; *Reset to
+  file* restores the repo copy. llama.cpp stores no prompt — every caller must send it.
+- **Docs are generated.** `/api/transports/:id/docs` and `.txt` build the connection, OpenAI,
+  Anthropic, prompt, parser, error and SSE sections from the live endpoint and model alias.
 
 ## Transport rules (gateway side)
 
@@ -84,7 +98,9 @@ that same API for every action, so the manager can be driven by curl or another 
 
 ## Verification
 
-`npm run check` runs 40 tests: parser stages, release asset mapping, SQLite seed/versioning,
+`npm run check` runs 52 tests: parser stages, release asset mapping, SQLite seed/versioning and
+migration v3 (`request_logs`, `tool_usage`, `mcp_tools`), request/tool aggregates, generated docs
+(HTTP, UDS, Markdown, no token leak), prompt file/DB sync, SSE auth plus `hello`/`audit` frames,
 UDS request + symlink idempotency, MCP server `initialize`/`tools/list`, admin auth/CSP/route
 validation, engine proxy + identity headers, seed/identity/legacy-DB guard, TLS cert/key matching,
 binary resolution and engine argument construction.

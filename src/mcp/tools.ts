@@ -71,6 +71,15 @@ export const MCP_TOOLS: ToolDefinition[] = [
   },
 ];
 
+/** Short, human explanation shown in the MCP matrix (not in the integration docs). */
+export const TOOL_USE_CASES: Record<string, string> = {
+  read_file: "Read a workspace file before editing or to gather evidence.",
+  write_file: "Write or update a workspace file; refuses secrets and paths outside the workspace.",
+  list_dir: "Inspect a workspace directory before choosing a file.",
+  run_shell: "Run one read-only allow-listed command (ls, wc, head, git status) without a shell.",
+  http_fetch: "Fetch an HTTP/HTTPS URL for read-only checks such as /health or /v1/models.",
+};
+
 export function workspaceRoot(): string {
   return path.resolve(process.env.LAMA_WORKSPACE || process.cwd());
 }

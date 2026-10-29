@@ -13,7 +13,7 @@
         <header class="topbar">
             <div class="brand"><button class="top-icon mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button><span class="logo">L</span><span class="brand-label">lama
                     <span class="muted" style="font-weight:400">Admin</span></span></div>
-            <div class="top-actions"><span class="top-pill" id="identityPill"><span class="dot"></span> <span id="identityName">lama</span></span><span class="top-pill" id="headerStatus"><span class="dot"></span> Connecting…</span><button class="top-icon" id="headerRefresh" title="Refresh data">↻</button><button class="top-icon" id="headerSettings" title="Connection &amp; auth">⚙</button></div>
+            <div class="top-actions"><span class="top-pill" id="livePill" title="Server-sent events"><span class="dot"></span> <span id="liveLabel">Events off</span></span><span class="top-pill" id="identityPill"><span class="dot"></span> <span id="identityName">lama</span></span><span class="top-pill" id="headerStatus"><span class="dot"></span> Connecting…</span><button class="top-icon" id="headerRefresh" title="Refresh data">↻</button><button class="top-icon" id="headerSettings" title="Connection &amp; auth">⚙</button></div>
         </header>
         <div class="shell">
             <aside class="sidebar" id="sidebar">
@@ -21,6 +21,7 @@
                     <div class="nav-group">
                         <div class="group-label">Workspace</div>
                         <button class="nav active" data-view="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</button>
+                        <button class="nav" data-view="logs"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Logs <span class="new" id="navLogCount">0</span></button>
                     </div>
                     <div class="nav-group">
                         <div class="group-label">Engine</div>
@@ -58,19 +59,19 @@
                             <div class="stat-note" id="statModelsNote">registry</div>
                         </div>
                         <div class="panel stat">
+                            <div class="stat-label">Requests <span style="color:var(--blue)">⇄</span></div>
+                            <div class="stat-value" id="statRequests">—</div>
+                            <div class="stat-note" id="statRequestsNote">through this admin</div>
+                        </div>
+                        <div class="panel stat">
                             <div class="stat-label">Engine <span style="color:var(--green)">◉</span></div>
                             <div class="stat-value" style="font-size:15px;margin-top:12px" id="statEngine"><span class="tag amber"><span class="dot"></span> —</span></div>
                             <div class="stat-note" id="statEngineNote">waiting for /api/state</div>
                         </div>
                         <div class="panel stat">
-                            <div class="stat-label">Loaded model <span style="color:var(--blue)">⌁</span></div>
+                            <div class="stat-label">Loaded model <span style="color:var(--amber)">⌁</span></div>
                             <div class="stat-value" style="font-size:14px;margin-top:10px" id="statLoaded">—</div>
                             <div class="stat-note" id="statLoadedNote">nothing loaded</div>
-                        </div>
-                        <div class="panel stat">
-                            <div class="stat-label">Registry <span style="color:var(--green)">●</span></div>
-                            <div class="stat-value" id="statRegistry">—</div>
-                            <div class="stat-note" id="statRegistryNote">mcp · transports · docs</div>
                         </div>
                     </div>
                     <div class="grid dashboard-grid">
@@ -90,38 +91,75 @@
                                 <div class="kv"><span class="k">Service mode</span><span class="v" id="dashService">—</span></div>
                                 <div class="kv"><span class="k">Identity</span><span class="v" id="dashIdentity">—</span></div>
                                 <div class="kv"><span class="k">Last update</span><span class="v" id="lastUpdate">—</span></div>
-                                <div class="pill-row" style="margin-top:13px"><button class="btn green" data-go="runtime">Engine controls</button><button class="btn" data-go="models">Manage models</button></div>
+                                <div class="pill-row" style="margin-top:13px"><button class="btn green" data-go="runtime">Engine controls</button><button class="btn" data-go="logs">Open live logs</button></div>
                             </div>
                         </div>
                         <div class="panel">
                             <div class="panel-head">
                                 <div>
-                                    <div class="panel-title">Quick actions</div>
-                                    <div class="panel-desc">Every action calls the same HTTP API</div>
-                                </div>
+                                    <div class="panel-title">Live metrics</div>
+                                    <div class="panel-desc">/proc sample every 2 s over SSE</div>
+                                </div><span class="tag" id="metricStamp">—</span>
                             </div>
                             <div class="panel-body">
-                                <div class="grid quick-grid">
-                                    <button class="quick" data-go="models"><span class="quick-icon">▦</span><strong>Load a model</strong><span>Pick a GGUF row and start the engine</span></button>
-                                    <button class="quick" data-go="chat"><span class="quick-icon">◇</span><strong>Playground</strong><span>Send a real chat completion</span></button>
-                                    <button class="quick" data-go="mcp"><span class="quick-icon">⌗</span><strong>MCP servers</strong><span>Sync tools into the engine config</span></button>
-                                    <button class="quick" data-go="tools"><span class="quick-icon">≡</span><strong>Tool parser</strong><span>Parse model output, then call a tool</span></button>
-                                </div>
+                                <div class="kv"><span class="k">CPU</span><span class="v mono" id="ovCpu">—</span></div>
+                                <div class="bar"><span id="ovCpuBar"></span></div>
+                                <div class="kv"><span class="k">Memory</span><span class="v mono" id="ovMem">—</span></div>
+                                <div class="bar"><span id="ovMemBar"></span></div>
+                                <div class="kv"><span class="k">Engine RSS</span><span class="v mono" id="ovRss">—</span></div>
+                                <div class="kv"><span class="k">Disk</span><span class="v mono" id="ovDisk">—</span></div>
+                                <div class="kv"><span class="k">Load</span><span class="v mono" id="ovLoad">—</span></div>
                             </div>
                         </div>
                     </div>
-                    <div class="panel" style="margin-top:11px">
+                    <div class="panel">
                         <div class="panel-head">
                             <div>
-                                <div class="panel-title">Audit trail</div>
-                                <div class="panel-desc">Newest events recorded in SQLite (GET /api/audit)</div>
+                                <div class="panel-title">Quick actions</div>
+                                <div class="panel-desc">Every action calls the same HTTP API</div>
                             </div>
-                            <div class="pill-row"><input class="field" id="activitySearch" placeholder="Filter event, target, actor…" style="width:230px"><button class="btn small" id="activityRefresh">↻ Refresh</button></div>
                         </div>
-                        <div class="table-wrap" style="border:0;border-radius:0">
-                            <table style="min-width:720px">
-                                <thead><tr><th>TIME</th><th>ACTOR</th><th>EVENT</th><th>TARGET</th><th>DETAIL</th></tr></thead>
-                                <tbody id="activityTable"></tbody>
+                        <div class="panel-body">
+                            <div class="grid quick-grid">
+                                <button class="quick" data-go="models"><span class="quick-icon">▦</span><strong>Load a model</strong><span>Pick a GGUF row and start the engine</span></button>
+                                <button class="quick" data-go="chat"><span class="quick-icon">◇</span><strong>Playground</strong><span>Stream a real chat completion</span></button>
+                                <button class="quick" data-go="logs"><span class="quick-icon">≡</span><strong>Live logs</strong><span>Audit, requests and engine events</span></button>
+                                <button class="quick" data-go="mcp"><span class="quick-icon">⌗</span><strong>MCP matrix</strong><span>Tool switches, usage and use cases</span></button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="view" id="view-logs">
+                    <div class="page-head">
+                        <div>
+                            <h1 class="page-title">Logs</h1>
+                            <p class="sub">One live stream from GET /api/events: audit, requests, engine phases, MCP and tools.</p>
+                        </div>
+                        <div><span class="tag green" id="logLive">SSE</span><button class="btn" id="logPause">Pause</button><button class="btn danger" id="logClear">Clear view</button></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Event stream</div>
+                                <div class="panel-desc" id="logStatus">Waiting for events…</div>
+                            </div>
+                            <div class="pill-row"><select class="select" id="logKind"><option value="all">All events</option><option value="audit">Audit</option><option value="request">Requests</option><option value="engine">Engine</option><option value="tool">Tools</option><option value="mcp">MCP</option></select><input class="field" id="logSearch" placeholder="Filter text…" style="width:190px"><span class="tag" id="logCount">0</span></div>
+                        </div>
+                        <div class="log-stream" id="logStream"><div class="muted" style="padding:14px">No events yet. Actions in this page and requests to /v1/* show up here.</div></div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Request log</div>
+                                <div class="panel-desc">Every proxy and playground call, stored in SQLite</div>
+                            </div>
+                            <div class="pill-row"><span class="tag" id="reqStats">—</span><button class="btn small" id="reqRefresh">↻ Refresh</button></div>
+                        </div>
+                        <div class="table-wrap" style="border:0">
+                            <table style="min-width:940px">
+                                <thead><tr><th>TIME</th><th>MODEL</th><th>PROTOCOL</th><th>TRANSPORT</th><th>MODE</th><th>STATUS</th><th>DURATION</th><th>TOKENS</th><th>PROMPT</th></tr></thead>
+                                <tbody id="requestTable"></tbody>
                             </table>
                         </div>
                     </div>
@@ -131,7 +169,7 @@
                     <div class="page-head">
                         <div>
                             <h1 class="page-title">Model List</h1>
-                            <p class="sub">One model runs at a time; loading another stops the current one.</p>
+                            <p class="sub">One model runs at a time. Requests are counted per model by this admin.</p>
                         </div>
                         <div><button class="btn" id="modelRefresh">↻ Refresh list</button><button class="btn green" id="loadModelTop">＋ Register model</button></div>
                     </div>
@@ -145,7 +183,7 @@
                         <div class="panel-head">
                             <div>
                                 <div class="panel-title">Model catalogue</div>
-                                <div class="panel-desc">Rows come from the SQLite registry, not from the page.</div>
+                                <div class="panel-desc">Provider mapping, API alias and live request counters.</div>
                             </div><span class="tag" id="modelCountBadge">—</span>
                         </div>
                         <div class="model-grid" id="modelsGrid"></div>
@@ -160,20 +198,23 @@
                     <div class="page-head">
                         <div>
                             <h1 class="page-title">Model Playground</h1>
-                            <p class="sub">Sends a real request through the manager proxy at /v1/chat/completions.</p>
+                            <p class="sub">POST /api/chat: OpenAI or Anthropic shape, HTTP or UDS, streaming or buffered.</p>
                         </div><span class="tag amber" id="chatBadge">NO REQUEST YET</span>
                     </div>
                     <div class="chat-layout">
                         <div class="panel chat-side">
                             <div class="panel-title" style="margin-bottom:12px">Test configuration</div>
-                            <div class="form-row" style="margin-bottom:12px"><label>MODEL</label><select class="field" id="chatModel"></select></div>
-                            <div class="form-row" style="margin-bottom:12px"><label>ENDPOINT</label><input class="field mono" id="chatBase" value="/v1/chat/completions" readonly></div>
-                            <div class="form-row" style="margin-bottom:12px"><label>SYSTEM PROMPT</label><select class="field" id="chatSystem"><option value="">None</option></select></div>
-                            <div class="form-row" style="margin-bottom:12px"><label>TEMPERATURE</label><input class="field" id="chatTemperature" type="number" min="0" max="2" step="0.1" value="0.7"></div>
-                            <div class="form-row" style="margin-bottom:12px"><label>MAX TOKENS</label><input class="field" id="chatMaxTokens" type="number" min="1" max="32768" value="512"></div>
-                            <button class="btn" id="chatClear" style="width:100%">Clear conversation</button>
+                            <div class="form-row" style="margin-bottom:10px"><label>MODEL</label><select class="field" id="chatModel"></select></div>
+                            <div class="form-row" style="margin-bottom:10px"><label>PROTOCOL</label><select class="field" id="chatProtocol"><option value="openai">OpenAI chat</option><option value="anthropic">Anthropic messages</option></select></div>
+                            <div class="form-row" style="margin-bottom:10px"><label>TRANSPORT</label><select class="field" id="chatTransport"></select></div>
+                            <div class="form-row" style="margin-bottom:10px"><label>SYSTEM PROMPT</label><select class="field" id="chatSystem"><option value="">None</option></select></div>
+                            <div class="form-row" style="margin-bottom:10px"><label>TEMPERATURE</label><input class="field" id="chatTemperature" type="number" min="0" max="2" step="0.1" value="0.7"></div>
+                            <div class="form-row" style="margin-bottom:10px"><label>MAX TOKENS</label><input class="field" id="chatMaxTokens" type="number" min="1" max="32768" value="512"></div>
+                            <label class="check-row"><input type="checkbox" id="chatStream" checked> Stream tokens</label>
+                            <label class="check-row"><input type="checkbox" id="chatTools"> Offer MCP tools</label>
+                            <button class="btn" id="chatClear" style="width:100%;margin-top:10px">Clear conversation</button>
                         </div>
-                        <div class="panel" style="display:flex;flex-direction:column;min-width:0">
+                        <div class="panel chat-panel">
                             <div class="panel-head">
                                 <div>
                                     <div class="panel-title">Conversation</div>
@@ -184,7 +225,7 @@
                             <div class="chat-transcript" id="chatTranscript">
                                 <div class="chat-empty"><strong>Ready to test a model</strong>Select a model, type a prompt and send. The engine must be loaded first.</div>
                             </div>
-                            <div class="chat-compose"><textarea class="field" id="chatPrompt" placeholder="Message the selected model… (Ctrl/⌘ + Enter to send)" rows="2"></textarea><button class="btn green" id="chatSend">Send</button></div>
+                            <div class="chat-compose"><textarea class="field" id="chatPrompt" placeholder="Message the selected model… (Enter to send, Shift+Enter for a new line)" rows="2"></textarea><button class="btn" id="chatStop" hidden>Stop</button><button class="btn green" id="chatSend">Send</button></div>
                         </div>
                     </div>
                 </section>
@@ -193,7 +234,7 @@
                     <div class="page-head">
                         <div>
                             <h1 class="page-title">Runtime</h1>
-                            <p class="sub">Single-model engine: load, reload and TTL expiry.</p>
+                            <p class="sub">Single-model engine: load, reload, TTL expiry and live memory.</p>
                         </div>
                         <div><button class="btn" id="runtimeRefresh">↻ Refresh runtime</button><button class="btn" data-go="models">Manage models</button></div>
                     </div>
@@ -214,9 +255,21 @@
                             <div class="stat-note" id="runtimeStarted">started —</div>
                         </div>
                         <div class="panel stat">
-                            <div class="stat-label">mmap proof</div>
-                            <div class="stat-value" style="font-size:14px;margin-top:11px" id="runtimeMmap">—</div>
-                            <div class="stat-note" id="runtimeMmapNote">/proc/&lt;pid&gt;/maps</div>
+                            <div class="stat-label">Engine RSS</div>
+                            <div class="stat-value" style="font-size:14px;margin-top:11px" id="runtimeRss">—</div>
+                            <div class="stat-note" id="runtimeRssNote">/proc/&lt;pid&gt;/stat</div>
+                        </div>
+                    </div>
+                    <div class="panel" id="progressBox" hidden>
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Engine transition</div>
+                                <div class="panel-desc" id="progressDetail">—</div>
+                            </div><span class="tag amber" id="progressPhase">—</span>
+                        </div>
+                        <div class="panel-body">
+                            <div class="bar big"><span id="progressBar"></span></div>
+                            <div class="sub" id="progressElapsed" style="margin-top:8px">—</div>
                         </div>
                     </div>
                     <div class="grid two">
@@ -232,6 +285,24 @@
                             </div>
                         </div>
                         <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">System resources</div><div class="panel-desc">/proc and /proc/&lt;pid&gt;, sampled live</div></div><span class="tag" id="rtMetricStamp">—</span></div>
+                            <div class="panel-body">
+                                <div class="kv"><span class="k">CPU</span><span class="v mono" id="rtCpu">—</span></div>
+                                <div class="bar"><span id="rtCpuBar"></span></div>
+                                <div class="kv"><span class="k">Memory</span><span class="v mono" id="rtMem">—</span></div>
+                                <div class="bar"><span id="rtMemBar"></span></div>
+                                <div class="kv"><span class="k">Swap</span><span class="v mono" id="rtSwap">—</span></div>
+                                <div class="kv"><span class="k">Disk</span><span class="v mono" id="rtDisk">—</span></div>
+                                <div class="kv"><span class="k">Engine CPU</span><span class="v mono" id="rtEngineCpu">—</span></div>
+                                <div class="kv"><span class="k">Threads</span><span class="v mono" id="rtThreads">—</span></div>
+                                <div class="kv"><span class="k">Engine uptime</span><span class="v mono" id="rtUptime">—</span></div>
+                                <div class="kv"><span class="k">Admin RSS</span><span class="v mono" id="rtAdminRss">—</span></div>
+                                <div class="kv"><span class="k">Load 1 / 5 / 15</span><span class="v mono" id="rtLoadAvg">—</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid two">
+                        <div class="panel">
                             <div class="panel-head"><div><div class="panel-title">Engine details</div><div class="panel-desc">GET /api/engine/status</div></div></div>
                             <div class="panel-body">
                                 <div class="kv"><span class="k">Socket</span><span class="v mono" id="rtSocket">—</span></div>
@@ -241,28 +312,48 @@
                                 <div class="kv"><span class="k">Last error</span><span class="v" id="rtError">—</span></div>
                             </div>
                         </div>
-                    </div>
-                    <div class="panel">
-                        <div class="panel-head"><div><div class="panel-title">Raw state</div><div class="panel-desc">engine_state row</div></div></div>
-                        <pre class="code" id="rtRaw">{}</pre>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Raw state</div><div class="panel-desc">Hidden by default; open only when debugging.</div></div></div>
+                            <div class="panel-body">
+                                <details class="fold"><summary>Show engine_state JSON</summary><pre class="code" id="rtRaw">{}</pre></details>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
                 <section class="view" id="view-transports">
                     <div class="page-head">
                         <div>
-                            <h1 class="page-title">Transports &amp; Documents</h1>
-                            <p class="sub">HTTP, HTTPS and UDS connection points with verified curl documents.</p>
+                            <h1 class="page-title">Transports &amp; Docs</h1>
+                            <p class="sub">HTTP, HTTPS and UDS connection points with generated provider-style docs.</p>
                         </div>
                         <div><button class="btn" id="transportRefresh">↻ Refresh</button><button class="btn green" id="addTransport">＋ Add transport</button><button class="btn" id="addDocument">＋ Add document</button></div>
                     </div>
                     <div class="panel">
-                        <div class="panel-head"><div><div class="panel-title">Transports</div><div class="panel-desc">Probe sends a real /v1/models request over the transport.</div></div></div>
+                        <div class="panel-head"><div><div class="panel-title">Transports</div><div class="panel-desc">Open a row to see every request and the full integration guide.</div></div></div>
                         <div class="table-wrap" style="border:0">
                             <table>
-                                <thead><tr><th>ID</th><th>PROTOCOL</th><th>ENDPOINT</th><th>GATEWAY HINT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <thead><tr><th>ID</th><th>PROTOCOL</th><th>ENDPOINT</th><th>REQUESTS</th><th style="text-align:right">ACTIONS</th></tr></thead>
                                 <tbody id="transportsTable"></tbody>
                             </table>
+                        </div>
+                    </div>
+                    <div id="transportDetail" hidden>
+                        <div class="panel">
+                            <div class="panel-head">
+                                <div><div class="panel-title" id="tdTitle">Transport</div><div class="panel-desc mono" id="tdMeta">—</div></div>
+                                <div class="pill-row"><span class="tag" id="tdStats">—</span><button class="btn small" id="tdProbe">Probe</button><button class="btn small" id="tdLink" hidden>Link socket</button><button class="btn small" id="tdDocsTxt">Download .md</button><button class="btn small" id="tdClose">Close</button></div>
+                            </div>
+                            <div class="panel-body"><div class="docs" id="tdDocs"></div></div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">Requests over this transport</div><div class="panel-desc">Newest first, limit 100</div></div></div>
+                            <div class="table-wrap" style="border:0">
+                                <table style="min-width:860px">
+                                    <thead><tr><th>TIME</th><th>MODEL</th><th>PROTOCOL</th><th>MODE</th><th>STATUS</th><th>DURATION</th><th>TOKENS</th><th>DETAIL</th></tr></thead>
+                                    <tbody id="tdRequests"></tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                     <div class="panel">
@@ -282,24 +373,32 @@
                             <h1 class="page-title">MCP Servers</h1>
                             <p class="sub">llama.cpp accepts stdio MCP servers only; HTTP/SSE rows stay orchestrator-side.</p>
                         </div>
-                        <div><button class="btn" id="mcpRefresh">↻ Refresh</button><button class="btn" id="mcpSync">↻ Sync config</button><button class="btn" id="mcpShowConfig">View config</button><button class="btn green" id="addMcp">＋ Add server</button></div>
+                        <div><button class="btn" id="mcpRefresh">↻ Refresh</button><button class="btn" id="mcpSync">↻ Sync config</button><button class="btn green" id="addMcp">＋ Add server</button></div>
                     </div>
                     <div class="panel">
-                        <div class="panel-head"><div><div class="panel-title">Servers</div><div class="panel-desc">Probe starts the server and lists its tools.</div></div><span class="tag" id="mcpCount">—</span></div>
+                        <div class="panel-head"><div><div class="panel-title">Servers</div><div class="panel-desc">Status comes from the last probe; usage counts real tool calls.</div></div><span class="tag" id="mcpCount">—</span></div>
                         <div class="table-wrap" style="border:0">
-                            <table>
-                                <thead><tr><th>NAME</th><th>TRANSPORT</th><th>COMMAND / URL</th><th>ENV</th><th>TIMEOUT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                            <table style="min-width:980px">
+                                <thead><tr><th>NAME</th><th>STATUS</th><th>TRANSPORT</th><th>COMMAND / URL</th><th>TOOLS</th><th>USES</th><th style="text-align:right">ACTIONS</th></tr></thead>
                                 <tbody id="mcpTable"></tbody>
                             </table>
                         </div>
                     </div>
                     <div class="panel">
-                        <div class="panel-head"><div><div class="panel-title">Generated engine config</div><div class="panel-desc" id="mcpConfigPath">data/mcp-servers.generated.json</div></div></div>
-                        <pre class="code" id="mcpConfig">Not loaded.</pre>
+                        <div class="panel-head"><div><div class="panel-title">Tool matrix</div><div class="panel-desc">Each switch controls whether the playground offers that tool.</div></div><span class="tag" id="mcpMatrixCount">—</span></div>
+                        <div class="table-wrap" style="border:0">
+                            <table style="min-width:900px">
+                                <thead><tr><th>TOOL</th><th>SERVER</th><th>STATUS</th><th>ENABLED</th><th>CALLS</th><th>OK / FAIL</th><th>USE CASE</th></tr></thead>
+                                <tbody id="mcpMatrix"></tbody>
+                            </table>
+                        </div>
                     </div>
                     <div class="panel">
-                        <div class="panel-head"><div><div class="panel-title">Engine tools</div><div class="panel-desc">GET /tools on the engine (after a load)</div></div></div>
-                        <div class="panel-body"><div class="chip-list" id="mcpTools"><span class="muted">Not loaded.</span></div></div>
+                        <div class="panel-head"><div><div class="panel-title">Generated engine config</div><div class="panel-desc" id="mcpConfigPath">data/mcp-servers.generated.json</div></div><button class="btn small" id="mcpShowConfig">Load config</button></div>
+                        <div class="panel-body">
+                            <details class="fold"><summary>Show mcp-servers JSON</summary><pre class="code" id="mcpConfig">Not loaded.</pre></details>
+                            <div class="chip-list" id="mcpTools" style="margin-top:10px"><span class="muted">Engine tool list loads with a running engine.</span></div>
+                        </div>
                     </div>
                 </section>
 
@@ -307,14 +406,32 @@
                     <div class="page-head">
                         <div>
                             <h1 class="page-title">Prompts</h1>
-                            <p class="sub">Append-only versions; the default prompt is anchored to the identity.</p>
+                            <p class="sub">The managed system prompt is authored in the repo, versioned in SQLite and editable here.</p>
                         </div>
-                        <div><button class="btn" id="promptRefresh">↻ Refresh</button><button class="btn green" id="addPrompt">＋ Add prompt</button></div>
+                        <div><button class="btn" id="promptRefresh">↻ Refresh</button><button class="btn green" id="spSave">Save new version</button></div>
+                    </div>
+                    <div class="grid two">
+                        <div class="panel">
+                            <div class="panel-head">
+                                <div><div class="panel-title">System prompt</div><div class="panel-desc" id="spFile">prompts/lama-system.md</div></div>
+                                <span class="tag" id="spMeta">—</span>
+                            </div>
+                            <div class="panel-body">
+                                <textarea class="field mono" id="spContent" rows="18" spellcheck="false"></textarea>
+                                <div class="pill-row" style="margin-top:10px"><button class="btn green" id="spSave2">Save new version</button><button class="btn" id="spReset">Reset to file</button><button class="btn" id="spFileLoad">Load file copy</button><button class="btn" id="spCopy">Copy</button><button class="btn" id="spDownload">Download .md</button></div>
+                                <p class="sub" id="spChars" style="margin-top:9px">—</p>
+                            </div>
+                        </div>
+                        <div class="panel">
+                            <div class="panel-head"><div><div class="panel-title">How callers use it</div><div class="panel-desc">llama.cpp stores no prompt of its own.</div></div></div>
+                            <div class="panel-body"><div class="stack" id="spUsage"><span class="muted">Loading…</span></div></div>
+                        </div>
                     </div>
                     <div class="panel">
+                        <div class="panel-head"><div><div class="panel-title">Prompt library</div><div class="panel-desc">All rows stored in system_prompts, with real usage counts.</div></div><button class="btn green" id="addPrompt">＋ Add prompt</button></div>
                         <div class="table-wrap" style="border:0">
                             <table>
-                                <thead><tr><th>NAME</th><th>VERSION</th><th>DEFAULT</th><th>CONTENT</th><th style="text-align:right">ACTIONS</th></tr></thead>
+                                <thead><tr><th>NAME</th><th>VERSION</th><th>DEFAULT</th><th>RUNS</th><th>CHARS</th><th style="text-align:right">ACTIONS</th></tr></thead>
                                 <tbody id="promptsTable"></tbody>
                             </table>
                         </div>

@@ -73,6 +73,11 @@ export interface McpRow {
   api_key_ref: string | null;
   timeout_ms: number;
   enabled: number;
+  status: "unknown" | "active" | "inactive";
+  last_probe_at: string | null;
+  last_probe_detail: string;
+  use_count: number;
+  tools_count: number;
   metadata_json: string;
   created_at: string;
   updated_at: string;
@@ -146,6 +151,59 @@ export interface MmapStatus {
   perms: string | null;
   bytes: number | null;
   source: "proc-maps" | "unavailable";
+  detail: string;
+}
+
+export interface RequestLogRow {
+  id: number;
+  at: string;
+  model_id: string | null;
+  model_key: string | null;
+  provider_id: string | null;
+  transport_id: string | null;
+  protocol: "openai" | "anthropic" | "other";
+  endpoint: string;
+  method: string;
+  status: number;
+  ok: number;
+  stream: number;
+  duration_ms: number;
+  first_token_ms: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  bytes: number;
+  system_prompt_id: string | null;
+  detail: string;
+}
+
+export type RequestLogInput = Omit<RequestLogRow, "id" | "at"> & { at?: string };
+
+export interface ToolUsageRow {
+  id: number;
+  at: string;
+  tool: string;
+  mcp_id: string | null;
+  ok: number;
+  duration_ms: number;
+  detail: string;
+}
+
+export interface McpToolRow {
+  id: string;
+  mcp_id: string;
+  name: string;
+  description: string;
+  use_cases: string;
+  enabled: number;
+  updated_at: string;
+}
+
+export interface AuditRow {
+  id: number;
+  at: string;
+  actor: string;
+  action: string;
+  target: string;
   detail: string;
 }
 

@@ -44,5 +44,11 @@ export function mcpSummary(row: McpRow): Record<string, unknown> {
     url: row.url,
     timeout_ms: row.timeout_ms,
     enabled: Boolean(row.enabled),
+    status: row.status,
+    active: Boolean(row.enabled) && row.status === "active",
+    last_probe_at: row.last_probe_at,
+    last_probe_detail: row.last_probe_detail,
+    use_count: row.use_count,
+    tools_count: row.tools_count,
   };
 }

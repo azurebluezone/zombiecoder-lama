@@ -137,6 +137,66 @@ export interface ProbeResult {
   status: number | null;
 }
 
+/** Open a response stream without buffering it; used by the streaming chat relay. */
+export function openStream(
+  transport: Pick<TransportRow, "protocol" | "host" | "port" | "socket_path">,
+  urlPath: string,
+  options: RequestOptions = {},
+): Promise<http.IncomingMessage> {
+  const body = payload(options.body);
+  const headers: Record<string, string> = {
+    accept: "text/event-stream",
+    ...(options.headers ?? {}),
+  };
+  if (body) {
+    headers["content-type"] = headers["content-type"] ?? "application/json";
+    headers["content-length"] = String(body.length);
+  }
+  return new Promise((resolve, reject) => {
+    const onResponse = (res: http.IncomingMessage): void => {
+      res.setEncoding("utf8");
+      resolve(res);
+    };
+    let req: http.ClientRequest;
+    if (transport.protocol === "uds") {
+      if (!transport.socket_path) {
+        reject(new Error("UDS transport has no socket_path"));
+        return;
+      }
+      req = http.request(
+        {
+          socketPath: transport.socket_path,
+          path: urlPath,
+          method: options.method ?? (body ? "POST" : "GET"),
+          headers,
+        },
+        onResponse,
+      );
+    } else {
+      const host = transport.host || "127.0.0.1";
+      const port = transport.port || 9931;
+      const client = transport.protocol === "https" ? https : http;
+      req = client.request(
+        {
+          protocol: `${transport.protocol}:`,
+          hostname: host,
+          port,
+          path: urlPath,
+          method: options.method ?? (body ? "POST" : "GET"),
+          headers,
+          rejectUnauthorized: !(options.allowSelfSigned ?? false),
+        },
+        onResponse,
+      );
+    }
+    req.on("error", reject);
+    req.setTimeout(options.timeoutMs ?? 600_000, () =>
+      req.destroy(new Error(`stream timeout after ${options.timeoutMs ?? 600_000}ms`)),
+    );
+    req.end(body ?? undefined);
+  });
+}
+
 export async function probeTransport(transport: TransportRow, modelId: string, apiKey = ""): Promise<ProbeResult> {
   const auth = apiKey ? { authorization: `Bearer ${apiKey}` } : {};
   try {

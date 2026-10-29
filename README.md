@@ -127,8 +127,9 @@ cd "$HOME/lama" && git pull && npm install && npm run check \
 Every button calls the same public API, so the manager is fully usable with the UI deleted, with
 curl, or from another program. Verified on this machine: with no `web/` content, `GET /` returns
 `404` while `GET /api/state`, `GET /v1/models`, `POST /v1/chat/completions` and `GET /tools` all
-return `200`. The UI has nine views — Overview (with the audit trail), Model List, Playground,
-Runtime, Transports & Docs, MCP Servers, Prompts, Tool Parser, Connection & Auth — and no demo rows.
+return `200`. The UI has ten views — Overview, Logs (live audit/request/engine stream), Model List,
+Playground, Runtime, Transports & Docs, MCP Servers, Prompts, Tool Parser, Connection & Auth — and
+no demo rows.
 
 ## What it does
 
@@ -150,6 +151,20 @@ Runtime, Transports & Docs, MCP Servers, Prompts, Tool Parser, Connection & Auth
 - **Tool fallback in three stages.** Native `tool_calls` → `TOOL:`/`ARGS:`/`PATH:` markers → bare
   JSON blocks, with a schema-echo guard and a mislabel hint. Parsing never executes a tool;
   `/api/tools/call` is a separate audited endpoint. Tool use by a small model is never guaranteed.
+- **Live, not polled.** `GET /api/events` is a token-gated SSE stream (`hello`, `audit`, `request`,
+  `engine`, `metrics`, `mcp`, `tool`, `ping`). The Logs view renders it directly; a lost connection
+  reconnects after 4s. Nothing depends on SSE — the same rows are readable over REST.
+- **Every call is counted.** The admin proxy and `/api/chat` write a `request_logs` row (model,
+  protocol, transport, stream, status, duration, first token, tokens, prompt id), so Model List and
+  Logs show real totals instead of estimates. Per-tool calls land in `tool_usage`.
+- **The prompt is managed, the engine stores none.** `prompts/lama-system.md` is authored in the
+  repo, synced into `system_prompts` on boot, and editable in Prompts. An admin edit bumps the
+  version and sets `edited`, so a restart never overwrites it; *Reset to file* restores the repo
+  copy. `GET /api/system-prompt.txt` hands the text to callers, who must send it as the first
+  `system` message (OpenAI) or the top-level `system` field (Anthropic).
+- **Docs are generated from the registry.** `GET /api/transports/:id/docs(.txt)` builds
+  provider-style guides (connection, models/aliases, OpenAI, Anthropic, prompt, parser, errors,
+  SSE) from the live endpoint and alias, so every curl block is copy-pasteable.
 
 ## CLI
 
@@ -220,7 +235,9 @@ LAMA_ADMIN_TOKEN=<generated>
 | Surface | Route | Auth |
 | --- | --- | --- |
 | UI | `GET /` (`/admin` → 302 `/`) | shell is public; the tab asks for the token |
-| admin API | `GET /api/state`, `POST /api/engine/*`, `/api/models`, `/api/mcp`, `/api/prompts`, `/api/transports`, `/api/documents`, `/api/tools*`, `/api/audit` | `Authorization: Bearer <LAMA_ADMIN_TOKEN>` or `x-admin-token` |
+| admin API | `GET /api/state`, `/api/metrics`, `POST /api/engine/*`, `/api/models`, `/api/mcp`, `/api/prompts`, `/api/transports`, `/api/documents`, `/api/tools*`, `/api/audit` | `Authorization: Bearer <LAMA_ADMIN_TOKEN>` or `x-admin-token` |
+| live admin | `GET /api/events` (SSE), `GET /api/requests`, `/api/requests/stats`, `POST /api/chat`, `GET/PUT /api/system-prompt`, `POST /api/system-prompt/reset`, `GET /api/system-prompt.txt`, `GET /api/transports/:id/docs(.txt)` | same Bearer token |
+| metrics | `GET /api/metrics` (`/proc` CPU/RAM/disk/engine RSS); recent audit + requests ride inside `/api/state` | same Bearer token |
 | proxied engine | `/v1/*`, `/health`, `/props`, `/slots`, `/metrics`, `/tools`, `/tokenize`, `/apply-template`, `/embedding*` | loopback, or `LAMA_API_KEY` off-loopback |
 | liveness | `GET /healthz` | public |
 | identity | every response | `x-system-identity`, `x-system-version`, `x-system-owner`, `x-powered-by` |
@@ -274,12 +291,15 @@ does it on demand.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node --test test/*.test.ts  → 40 tests
+npm test            # node --test test/*.test.ts  → 52 tests
 ```
 
-Covered: portable config derivation, parser stages, release asset mapping, SQLite seed/migrations/legacy guard, UDS request +
-symlink idempotency, MCP `initialize`/`tools/list`, admin auth/CSP/route validation, proxy + identity
-headers, TLS cert/key matching, binary resolution, engine argument construction.
+Covered: portable config derivation, parser stages, release asset mapping, SQLite seed/migrations/legacy guard (incl.
+migration v3: `request_logs`, `tool_usage`, `mcp_tools`), request/tool aggregates, generated transport
+docs (HTTP + UDS + Markdown, no token leak), prompt file/DB sync (`edited` wins over boot),
+SSE auth + `hello`/`audit` frames, UDS request + symlink idempotency, MCP `initialize`/`tools/list`,
+admin auth/CSP/route validation, proxy + identity headers, TLS cert/key matching, binary resolution,
+engine argument construction.
 
 Live on this machine (build `11941`, `0.7.0-dev`):
 
@@ -292,6 +312,10 @@ Live on this machine (build `11941`, `0.7.0-dev`):
 | mmap proof | `mapped: true`, `r--s`, model present in `/proc/<pid>/maps` |
 | TTL expiry (0.01h) | unloaded by the loop, port `9931` closed, socket removed |
 | admin stopped | engine `200`, gateway chat `200` |
+| `GET /api/events` | `text/event-stream`, `retry: 3000`, `hello` frame, live `audit`/`request` frames |
+| OpenAI + Anthropic, HTTP + UDS, stream + buffered | `200`; OpenAI `data: [DONE]`, Anthropic named events |
+| `/api/chat` with `system_prompt_id=system` | prompt tokens `30` → `935`, `done` frame carries duration/first-token/usage |
+| request log / stats | 63 rows recorded, `0` failed, grouped per model + transport |
 
 ## Not tested here
 
@@ -303,6 +327,7 @@ Live on this machine (build `11941`, `0.7.0-dev`):
 
 ```
 src/            manager: config, db, engine, admin, service, installer, seed, identity, transport, mcp/, tools/
+prompts/        managed system prompt (seeded into SQLite, editable in the admin)
 web/            admin UI (index.html, app.js, style.css) — no build step
 db/seed/        declarative seed rows
 test/           node:test suites
