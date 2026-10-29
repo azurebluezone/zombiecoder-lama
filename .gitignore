@@ -16,6 +16,10 @@ run/
 workspace/
 gateway/
 
+# build output (scripts/build-dist.mjs)
+dist/
+lama-dist-*.tgz
+
 # editor / OS noise
 node_modules/
 .DS_Store

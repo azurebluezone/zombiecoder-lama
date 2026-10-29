@@ -12,6 +12,8 @@
     "setup": "node src/main.ts setup",
     "doctor": "node src/main.ts doctor",
     "install:llama": "node src/main.ts install",
+    "install:all": "node scripts/install.mjs",
+    "build:dist": "node scripts/build-dist.mjs",
     "mcp": "node src/mcp/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
