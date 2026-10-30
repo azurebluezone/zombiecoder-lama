@@ -13,7 +13,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 REPO="${LAMA_REPO:-azurebluezone/zombiecoder-lama}"
-RAW="https://raw.githubusercontent.com/${REPO}/main/scripts/bootstrap.sh"
+# refs/heads/main is used instead of /main/ because GitHub's raw CDN can serve
+# stale bytes for the short form for minutes after a push.
+RAW="https://raw.githubusercontent.com/${REPO}/refs/heads/main/scripts/bootstrap.sh"
 DEST="${LAMA_BOOTSTRAP_TEST_DIR:-/tmp/opencode/lama-bootstrap-check}"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/lama-check.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT

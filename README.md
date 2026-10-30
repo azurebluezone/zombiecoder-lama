@@ -143,7 +143,7 @@ anything failed. Live on this machine: `9/9 steps ok`, exit `0`.
 Fresh machine, nothing cloned yet:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/refs/heads/main/scripts/bootstrap.sh | bash
 ```
 
 `scripts/bootstrap.sh` installs the official Node 24 build only when `node -v` is older (checksum
@@ -152,13 +152,13 @@ installer above. A re-run is an update: `.env`, `data/`, `models/` and `logs/` a
 
 ```bash
 # headless server
-curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash -s -- --no-browser
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/refs/heads/main/scripts/bootstrap.sh | bash -s -- --no-browser
 
 # different directory / branch
-curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | LAMA_DIR="$HOME/llm" LAMA_REF=main bash
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/refs/heads/main/scripts/bootstrap.sh | LAMA_DIR="$HOME/llm" LAMA_REF=main bash
 
 # download only, do not install
-curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash -s -- --fetch-only
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/refs/heads/main/scripts/bootstrap.sh | bash -s -- --fetch-only
 ```
 
 
