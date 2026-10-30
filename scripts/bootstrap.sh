@@ -120,10 +120,23 @@ tar -xzf "$archive" -C "${tmp}/src" --strip-components=1 ||
 
 # --- 4. overlay into the destination --------------------------------------
 # Never delete .env, data/, models/ or logs/: a re-run is an update, not a reset.
+# identity.json is runtime state with mode 0444; preserve it and let tar unlink
+# read-only targets instead of failing like cp -a did.
 mkdir -p "$DEST"
-cp -a "${tmp}/src/." "$DEST/"
+saved_identity=""
+if [ -f "$DEST/identity.json" ]; then
+  saved_identity="${tmp}/identity.json"
+  cp -p "$DEST/identity.json" "$saved_identity" || true
+  rm -f "$DEST/identity.json"
+fi
+tar -C "${tmp}/src" -cf - . | tar -C "$DEST" -xf - ||
+  die "cannot overlay the downloaded tree into ${DEST}"
+if [ -n "$saved_identity" ] && [ -f "$saved_identity" ]; then
+  cp -p "$saved_identity" "$DEST/identity.json"
+  chmod 0444 "$DEST/identity.json" 2>/dev/null || true
+fi
 [ -f "${DEST}/src/main.ts" ] || die "copy into ${DEST} failed"
-say "  code : updated (kept .env, data/, models/, logs/)"
+say "  code : updated (kept .env, data/, models/, logs/, identity.json)"
 
 if [ "$FETCH_ONLY" -eq 1 ]; then
   say "FETCH_OK ${DEST}"
