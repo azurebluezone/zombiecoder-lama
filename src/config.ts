@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +22,7 @@ export interface Config {
   adminPort: number;
   adminToken: string;
   apiKey: string;
+  apiAuth: "loopback" | "open" | "required";
   engineApiKey: string;
   engineHost: string;
   enginePort: number;
@@ -72,6 +74,55 @@ function flag(value: string | undefined, fallback: boolean): boolean {
   return /^(1|true|yes|on)$/i.test(value);
 }
 
+export type ApiAuthMode = "loopback" | "open" | "required";
+
+function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase();
+  return value === "127.0.0.1" || value === "::1" || value === "localhost" || value === "[::1]";
+}
+
+/** Read the persisted proxy token, generating one on first use. Never logs it. */
+function apiTokenFrom(file: string): string {
+  try {
+    const existing = fs.readFileSync(file, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // missing file means "generate below"
+  }
+  const token = crypto.randomBytes(24).toString("base64url");
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, `${token}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // best effort on filesystems without POSIX modes
+  }
+  return token;
+}
+
+/**
+ * LAMA_API_KEY is a three-state switch, not only a secret:
+ *   false / off / none / 0     -> open: no token at all, even from the LAN
+ *   true / on / required       -> a token is required, loopback included
+ *   empty / unset              -> loopback needs nothing; a non-loopback bind
+ *                                 generates and persists one automatically
+ *   any other value            -> that value is the token
+ */
+export function resolveApiKey(
+  raw: string,
+  adminHost: string,
+  tokenFile: string,
+): { apiKey: string; apiAuth: ApiAuthMode } {
+  const value = raw.trim();
+  if (/^(false|off|none|no|0)$/i.test(value)) return { apiKey: "", apiAuth: "open" };
+  if (/^(true|on|yes|1|required|auto|random)$/i.test(value)) {
+    return { apiKey: apiTokenFrom(tokenFile), apiAuth: "required" };
+  }
+  if (value) return { apiKey: value, apiAuth: "required" };
+  if (isLoopbackHost(adminHost)) return { apiKey: "", apiAuth: "loopback" };
+  return { apiKey: apiTokenFrom(tokenFile), apiAuth: "required" };
+}
+
 export function loadConfig(): Config {
   const envFile = process.env.LAMA_ENV_FILE || path.join(ROOT, ".env");
   const fileEnv = parseEnvFile(envFile);
@@ -111,6 +162,16 @@ export function loadConfig(): Config {
         : path.resolve(udsOverride);
 
   const warnings: string[] = [];
+  const apiTokenFile = path.join(dataDir, "api-token");
+  const rawApiKey = (env("LAMA_API_KEY") || "").trim();
+  const { apiKey, apiAuth } = resolveApiKey(rawApiKey, adminHost, apiTokenFile);
+  if (apiAuth === "open") {
+    warnings.push("LAMA_API_KEY=false: /v1 accepts any client without a token; use only on a trusted network");
+  } else if (apiAuth === "required" && (!rawApiKey || /^(true|on|yes|1|required|auto|random)$/i.test(rawApiKey))) {
+    warnings.push(
+      `LAMA_API_KEY generated a token in ${apiTokenFile} (mode 600); send it as Authorization: Bearer or x-api-key`,
+    );
+  }
   const serviceModeRaw = (env("LAMA_SERVICE_MODE") || "none").toLowerCase();
   const serviceMode: Config["serviceMode"] =
     serviceModeRaw === "user" || serviceModeRaw === "system" ? serviceModeRaw : "none";
@@ -141,7 +202,8 @@ export function loadConfig(): Config {
     adminHost,
     adminPort,
     adminToken: env("LAMA_ADMIN_TOKEN") || "",
-    apiKey: env("LAMA_API_KEY") || "",
+    apiKey,
+    apiAuth,
     engineApiKey: env("LAMA_ENGINE_API_KEY") || "",
     engineHost,
     enginePort,

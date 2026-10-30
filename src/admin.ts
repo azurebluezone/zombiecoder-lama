@@ -146,6 +146,14 @@ function tokenFrom(req: http.IncomingMessage): string {
   return typeof direct === "string" ? direct.trim() : "";
 }
 
+/** Proxy clients speak both dialects: OpenAI sends Bearer, Anthropic sends x-api-key. */
+function proxyToken(req: http.IncomingMessage): string {
+  const bearer = tokenFrom(req);
+  if (bearer) return bearer;
+  const key = req.headers["x-api-key"];
+  return typeof key === "string" ? key.trim() : "";
+}
+
 function loopback(req: http.IncomingMessage): boolean {
   const address = req.socket.remoteAddress ?? "";
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
@@ -550,11 +558,13 @@ export function createAdminServer(ctx: Context): http.Server {
         return;
       }
 
-      // OpenAI/Anthropic surface for the gateway: loopback by default, or LAMA_API_KEY.
+      // OpenAI/Anthropic surface for the gateway. LAMA_API_KEY is the switch:
+      // false/open = any client, empty/loopback = local only, true = token always.
       if (PROXY_PATHS.test(pathname)) {
-        if (!loopback(req)) {
-          if (!cfg.apiKey) return fail(res, 403, "proxy is loopback-only; set LAMA_API_KEY for remote use");
-          if (!safeEqual(tokenFrom(req), cfg.apiKey)) return fail(res, 401, "invalid proxy API key");
+        if (cfg.apiAuth === "required") {
+          if (!safeEqual(proxyToken(req), cfg.apiKey)) return fail(res, 401, "invalid proxy API key");
+        } else if (cfg.apiAuth === "loopback" && !loopback(req)) {
+          return fail(res, 403, "proxy is loopback-only; set LAMA_API_KEY=false to open it, or true for a token");
         }
         await proxyToEngine(req, res, `${pathname}${url.search}`);
         return;
@@ -607,8 +617,42 @@ export function createAdminServer(ctx: Context): http.Server {
       // ---------- state ----------
       if (method === "GET" && pathname === "/api/state") {
         const stats = store.requestStats(0);
+        // The dashboard "Requests" card counts every request through the admin,
+        // including /v1/models and /props calls that carry no model in the body.
+        const requestTotals = stats.reduce(
+          (acc, row) => ({
+            total: acc.total + row.total,
+            ok: acc.ok + row.ok,
+            failed: acc.failed + row.failed,
+          }),
+          { total: 0, ok: 0, failed: 0 },
+        );
         const toolStats = new Map(store.toolUsageStats().map((row) => [row.tool, row]));
-        const byModel = new Map(stats.filter((row) => row.model_id).map((row) => [row.model_id, row]));
+        // requestStats groups by (model_id, transport_id). The UI needs one row
+        // per model, so sum every transport group - keying by model_id alone kept
+        // only the last group and the dashboard total froze (e.g. stuck at 20
+        // while request_logs kept growing).
+        const byModel = new Map<string, (typeof stats)[number]>();
+        for (const row of stats) {
+          if (!row.model_id) continue;
+          const current = byModel.get(row.model_id);
+          if (!current) {
+            byModel.set(row.model_id, { ...row, transport_id: null });
+            continue;
+          }
+          const total = current.total + row.total;
+          byModel.set(row.model_id, {
+            model_id: row.model_id,
+            transport_id: null,
+            total,
+            ok: current.ok + row.ok,
+            failed: current.failed + row.failed,
+            avg_ms: total ? Math.round((current.avg_ms * current.total + row.avg_ms * row.total) / total) : 0,
+            last_at: (current.last_at ?? "") > (row.last_at ?? "") ? current.last_at : row.last_at,
+            prompt_tokens: current.prompt_tokens + row.prompt_tokens,
+            completion_tokens: current.completion_tokens + row.completion_tokens,
+          });
+        }
         const promptUsage = new Map(store.promptUsage().map((row) => [row.system_prompt_id ?? "", row]));
         const prompt = store.getPrompt("system");
         json(res, 200, {
@@ -634,6 +678,7 @@ export function createAdminServer(ctx: Context): http.Server {
           },
           engine: await engine.status(),
           metrics: metrics.sample(),
+          request_totals: requestTotals,
           identity,
           providers: store.listProviders(),
           models: store.listModels().map((model) => ({

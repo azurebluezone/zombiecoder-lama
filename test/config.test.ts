@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { ROOT, loadConfig } from "../src/config.ts";
+import { ROOT, loadConfig, resolveApiKey } from "../src/config.ts";
 
 const KEYS = [
   "LAMA_HOME",
@@ -63,4 +63,44 @@ test("a relative root override resolves against the working directory, not a hom
     assert.equal(cfg.root, path.resolve("./tmp-root"));
     assert.equal(cfg.dataDir, path.resolve("./tmp-root", "data"));
   });
+});
+
+test("LAMA_API_KEY=false opens the proxy without a token", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lama-apikey-"));
+  const file = path.join(dir, "api-token");
+  const resolved = resolveApiKey("false", "0.0.0.0", file);
+  assert.deepEqual(resolved, { apiKey: "", apiAuth: "open" });
+  assert.equal(fs.existsSync(file), false, "open mode must not create a token file");
+});
+
+test("an empty LAMA_API_KEY stays token-free on loopback and self-generates when bound to the LAN", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lama-apikey-"));
+  const file = path.join(dir, "api-token");
+  assert.deepEqual(resolveApiKey("", "127.0.0.1", file), { apiKey: "", apiAuth: "loopback" });
+  assert.equal(fs.existsSync(file), false, "loopback mode needs no token file");
+
+  const remote = resolveApiKey("  ", "0.0.0.0", file);
+  assert.equal(remote.apiAuth, "required");
+  assert.ok(remote.apiKey.length >= 24, "a real random token was generated");
+  assert.equal(fs.readFileSync(file, "utf8").trim(), remote.apiKey);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(resolveApiKey("", "0.0.0.0", file).apiKey, remote.apiKey, "the token persists across reloads");
+});
+
+test("LAMA_API_KEY=true requires a token even on loopback", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lama-apikey-"));
+  const file = path.join(dir, "api-token");
+  const resolved = resolveApiKey("true", "127.0.0.1", file);
+  assert.equal(resolved.apiAuth, "required");
+  assert.ok(resolved.apiKey.length >= 24);
+});
+
+test("an explicit LAMA_API_KEY value is used verbatim", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lama-apikey-"));
+  const file = path.join(dir, "api-token");
+  assert.deepEqual(resolveApiKey("house-key-123", "127.0.0.1", file), {
+    apiKey: "house-key-123",
+    apiAuth: "required",
+  });
+  assert.equal(fs.existsSync(file), false);
 });

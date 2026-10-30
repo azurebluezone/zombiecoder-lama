@@ -22,6 +22,7 @@ export function testConfig(root: string): Config {
     adminPort: 0,
     adminToken: "test-token",
     apiKey: "",
+    apiAuth: "loopback",
     engineApiKey: "",
     engineHost: "127.0.0.1",
     enginePort: 19931,

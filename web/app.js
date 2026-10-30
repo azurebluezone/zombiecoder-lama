@@ -533,7 +533,7 @@ function renderOverview() {
   const data = state.data;
   const engine = data.engine || {};
   const loaded = data.models.find((model) => model.id === engine.model_id);
-  const totals = requestTotals(data.models);
+  const totals = data.request_totals || requestTotals(data.models);
 
   setText("#statModels", data.models.length);
   setText("#statModelsNote", `${data.models.filter((model) => model.enabled).length} enabled · registry`);
