@@ -33,6 +33,7 @@ export function testConfig(root: string): Config {
     build: null,
     tlsKey: path.join(root, "certs", "localhost-key.pem"),
     tlsCert: path.join(root, "certs", "localhost-cert.pem"),
+    tls: false,
     serviceMode: "none",
     gatewayDir: path.join(root, "gateway"),
     defaultTtlHours: 4,

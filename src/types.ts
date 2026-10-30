@@ -188,6 +188,20 @@ export interface ToolUsageRow {
   detail: string;
 }
 
+export interface DownloadRow {
+  id: number;
+  repo: string;
+  file: string;
+  path: string;
+  bytes_total: number;
+  bytes_done: number;
+  status: "queued" | "running" | "done" | "failed";
+  error: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
+}
+
 export interface McpToolRow {
   id: string;
   mcp_id: string;

@@ -4,7 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createAdminServer } from "../src/admin.ts";
+import { createAdminServer, listenAdminServer, adminHealth } from "../src/admin.ts";
 import { Store, seedStore } from "../src/db.ts";
 import { EngineManager } from "../src/engine.ts";
 import { testConfig, testOs } from "./helpers.ts";
@@ -93,6 +93,44 @@ test("invalid model paths and unknown tools are rejected without side effects", 
     });
     assert.equal(badTool.status, 400);
   });
+});
+
+test("a second admin on the same port fails with one actionable line", async () => {
+  await withAdmin(async (base) => {
+    const port = Number(new URL(base).port);
+    const second = http.createServer((_req, res) => res.end());
+    await assert.rejects(listenAdminServer(second, "127.0.0.1", port), (error: NodeJS.ErrnoException) => {
+      assert.equal(error.code, "EADDRINUSE");
+      assert.match(error.message, /already in use/);
+      assert.match(error.message, new RegExp(`ss -ltnp .*:${port}`));
+      return true;
+    });
+    second.close();
+  });
+});
+
+test("adminHealth trusts this admin's healthz and rejects a foreign one", async () => {
+  await withAdmin(async (base) => {
+    const url = new URL(base);
+    const own = await adminHealth(url.hostname, Number(url.port));
+    assert.equal(own.up, true, own.detail);
+  });
+  // The legacy JS manager also answers 200 on /healthz with {"ok":true}; it must
+  // not be mistaken for a running lama admin.
+  const legacy = http.createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise<void>((resolve) => legacy.listen(0, "127.0.0.1", () => resolve()));
+  const address = legacy.address();
+  if (!address || typeof address === "string") throw new Error("no port");
+  try {
+    const foreign = await adminHealth("127.0.0.1", address.port);
+    assert.equal(foreign.up, false);
+    assert.match(foreign.detail, /not as lama-admin/);
+  } finally {
+    await new Promise<void>((resolve) => legacy.close(() => resolve()));
+  }
 });
 
 test("manager proxies the engine surface and stamps identity headers", async () => {

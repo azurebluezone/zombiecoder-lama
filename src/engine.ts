@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import type { Config } from "./config.ts";
 import type { EngineState, MmapStatus, ModelRow, OsInfo, ToolCall } from "./types.ts";
@@ -47,19 +48,25 @@ export function resolveBinary(cfg: Config): { command: string; prefix: string[] 
   // binary (with the `serve` subcommand) and older trees ship `llama-server`.
   const explicit = Boolean(cfg.llamaBin);
   const names = process.platform === "win32" ? ["llama.exe", "llama-server.exe"] : ["llama", "llama-server"];
-  // No absolute path in .env: a bare name is resolved from PATH, then from the per-user
-  // install location the stock release script uses (`~/.local/bin` on POSIX,
-  // `%LOCALAPPDATA%\llama` on Windows).
+  // Precedence, most specific first: the project-local engine, then an ambient PATH
+  // install, then the per-user install location the stock release script uses
+  // (`~/.local/bin` on POSIX, `%LOCALAPPDATA%\llama` on Windows).
   const homeBin =
     process.platform === "win32"
       ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "llama")
       : path.join(os.homedir(), ".local", "bin");
-  // `npm run install:llama` links the stock binary into <root>/bin, so a fresh install is
-  // found without adding anything to PATH.
+  // `npm run install:llama` links the stock binary into <root>/bin, and `build:dist`
+  // bundles it at <root>/bin too. Those are pinned to this install, so they win over
+  // whatever happens to sit on PATH — otherwise the same dist would run a different
+  // engine depending on the machine it lands on.
   const projectBin = path.join(cfg.root, "bin");
   const candidates = explicit
     ? [cfg.llamaBin]
-    : [...names, ...names.map((name) => path.join(projectBin, name)), ...names.map((name) => path.join(homeBin, name))];
+    : [
+        ...names.map((name) => path.join(projectBin, name)),
+        ...names,
+        ...names.map((name) => path.join(homeBin, name)),
+      ];
   const locate = (candidate: string): string | null =>
     candidate.includes(path.sep) || candidate.endsWith(".exe")
       ? fs.existsSync(candidate)
@@ -82,10 +89,15 @@ export function resolveBinary(cfg: Config): { command: string; prefix: string[] 
   return { command: found, prefix: base === "llama" || base === "llama.exe" ? ["serve"] : [] };
 }
 
+/** Blue-green instances get their own socket file; llama.cpp only binds paths ending in ".sock". */
+export function spareUds(base: string, port: number): string {
+  return base.endsWith(".sock") ? `${base.slice(0, -5)}-${port}.sock` : `${base}-${port}.sock`;
+}
+
 export function buildEngineArgs(
   cfg: Config,
   model: ModelRow,
-  options: { forceLoadMode?: string; tls?: boolean } = {},
+  options: { forceLoadMode?: string; tls?: boolean; port?: number; udsPath?: string | null } = {},
 ): { command: string; args: string[]; logFile: string } {
   if (!model.path) throw new Error(`model ${model.id} has no path`);
   const modelPath = path.resolve(model.path);
@@ -93,9 +105,9 @@ export function buildEngineArgs(
   const binary = resolveBinary(cfg);
   const loadMode = options.forceLoadMode ?? model.load_mode ?? cfg.loadMode;
   const host = process.env.LAMA_ENGINE_HOST || cfg.engineHost;
-  const port = String(process.env.LAMA_ENGINE_PORT || cfg.enginePort);
+  const port = String(options.port ?? process.env.LAMA_ENGINE_PORT ?? cfg.enginePort);
   // Empty socket path means "no UDS on this OS"; the TCP listener still works.
-  const uds = (process.env.LAMA_UDS_SOCK ?? cfg.udsPath).trim();
+  const uds = (options.udsPath !== undefined ? options.udsPath ?? "" : process.env.LAMA_UDS_SOCK ?? cfg.udsPath).trim();
   if (uds) fs.mkdirSync(path.dirname(uds), { recursive: true, mode: 0o700 });
 
   const args = [
@@ -122,7 +134,7 @@ export function buildEngineArgs(
   ];
 
   if (loadMode && loadMode !== "auto") args.push("--load-mode", loadMode);
-  const tls = options.tls ?? process.env.LAMA_TLS === "1";
+  const tls = options.tls ?? cfg.tls;
   if (tls) {
     if (!fs.existsSync(cfg.tlsKey) || !fs.existsSync(cfg.tlsCert)) {
       throw new Error(`TLS requested but key/cert missing: ${cfg.tlsKey}, ${cfg.tlsCert}`);
@@ -198,6 +210,15 @@ export interface EngineProgress {
   at: string;
 }
 
+/**
+ * A model is addressable by its row id (slug of the file name) and by the public
+ * alias (models.model_id) that the UI and /v1/models show. `engine load <model-id>`
+ * must accept both, or the name the operator actually sees is "unknown".
+ */
+export function resolveModel(store: Store, key: string): ModelRow | undefined {
+  return store.getModel(key) ?? store.getModelByModelId(key);
+}
+
 export class EngineManager {
   private readonly store: Store;
   private readonly cfg: Config;
@@ -235,7 +256,7 @@ export class EngineManager {
     if (preferUds && this.cfg.udsPath) {
       return { protocol: "uds", host: null, port: null, socket_path: this.cfg.udsPath };
     }
-    const https = process.env.LAMA_TLS === "1";
+    const https = this.cfg.tls;
     return {
       protocol: https ? "https" : "http",
       host: this.cfg.engineHost,
@@ -258,6 +279,208 @@ export class EngineManager {
       }
     }
     return { ok: false, status: null, detail: "unreachable" };
+  }
+
+  /** Probe one specific port: the blue-green warm-up engine is not active yet. */
+  private async healthAt(port: number): Promise<{ ok: boolean; detail: string }> {
+    try {
+      const res = await request(
+        { protocol: this.cfg.tls ? "https" : "http", host: this.cfg.engineHost, port, socket_path: null },
+        "/health",
+        { timeoutMs: 2000, allowSelfSigned: process.env.LAMA_TLS_INSECURE === "1" },
+      );
+      return { ok: res.status === 200, detail: `health ${res.status}` };
+    } catch (error) {
+      return { ok: false, detail: (error as Error).message };
+    }
+  }
+
+  /**
+   * Real llama.cpp gauges for any instance, including a draining one that is no
+   * longer the active proxy target. Null means "not measurable", never zero.
+   */
+  async liveLoad(port: number | null | undefined): Promise<{
+    processing: number | null;
+    deferred: number | null;
+    reachable: boolean;
+  }> {
+    if (!port) return { processing: null, deferred: null, reachable: false };
+    try {
+      const res = await request(
+        { protocol: this.cfg.tls ? "https" : "http", host: this.cfg.engineHost, port, socket_path: null },
+        "/metrics",
+        { timeoutMs: 1200, allowSelfSigned: process.env.LAMA_TLS_INSECURE === "1" },
+      );
+      if (res.status !== 200) return { processing: null, deferred: null, reachable: false };
+      const processing = /llamacpp:requests_processing\s+(\d+)/.exec(res.text);
+      const deferred = /llamacpp:requests_deferred\s+(\d+)/.exec(res.text);
+      return {
+        processing: processing ? Number(processing[1]) : null,
+        deferred: deferred ? Number(deferred[1]) : null,
+        reachable: true,
+      };
+    } catch {
+      return { processing: null, deferred: null, reachable: false };
+    }
+  }
+
+  /** Drain signal: how many requests the old engine is still processing. */
+  private async requestsProcessing(port: number): Promise<number | null> {
+    return (await this.liveLoad(port)).processing;
+  }
+
+  /**
+   * One cheap snapshot for the admin UI (about 1s polling): stored state, the
+   * supervisor's phase marker, real gauges on active + draining ports, and the
+   * last swap facts. No /proc mmap scan, no model table read.
+   */
+  async relayStatus(): Promise<{
+    phase: "idle" | "warming" | "draining";
+    reloading: boolean;
+    model_id: string | null;
+    active: {
+      pid: number | null;
+      port: number | null;
+      status: string;
+      alive: boolean;
+      started_at: string | null;
+      expires_at: string | null;
+      processing: number | null;
+      deferred: number | null;
+    };
+    warming: { since: string | null; port: number | null } | null;
+    draining: {
+      old_pid: number | null;
+      old_port: number;
+      since: string | null;
+      processing: number | null;
+      deferred: number | null;
+      alive: boolean;
+    } | null;
+    inflight: { processing: number | null; deferred: number | null };
+    last_swap: {
+      at: string;
+      old_pid: number | null;
+      old_port: number | null;
+      new_pid: number | null;
+      new_port: number | null;
+    } | null;
+    last_drain: { at: string; old_pid: number | null } | null;
+    last_error: string | null;
+    stable: {
+      admin_host: string;
+      admin_port: number;
+      base_url: string;
+      openai_base_url: string;
+      models_url: string;
+      uds_path: string | null;
+    };
+    checked_at: string;
+  }> {
+    type Marker = {
+      phase?: "warming" | "draining" | "idle";
+      at?: string;
+      model_id?: string;
+      old_pid?: number | null;
+      old_port?: number | null;
+      new_pid?: number | null;
+      new_port?: number | null;
+      error?: string;
+    };
+    const state = this.store.engineState();
+    let marker: Marker = {};
+    try {
+      const raw = this.store.setting("engine_relay");
+      if (raw) marker = JSON.parse(raw) as Marker;
+    } catch {
+      marker = {};
+    }
+    // A marker older than the longest legal reload, or a draining marker whose
+    // old pid is already dead, is history - never a stuck UI.
+    const markerAt = marker.at ? Date.parse(marker.at) : Number.NaN;
+    const markerFresh = Number.isFinite(markerAt) && Date.now() - markerAt < 15 * 60_000;
+    let storedPhase: "idle" | "warming" | "draining" =
+      markerFresh && (marker.phase === "warming" || marker.phase === "draining") ? marker.phase : "idle";
+    if (storedPhase === "draining" && !isAlive(marker.old_pid ?? null)) storedPhase = "idle";
+    const phase: "idle" | "warming" | "draining" = storedPhase === "idle" && this.reloading ? "warming" : storedPhase;
+
+    const activePort = state.port ?? this.cfg.enginePort;
+    const activeAlive = Boolean(state.pid && isAlive(state.pid));
+    const activeLive =
+      activeAlive && state.status === "running"
+        ? await this.liveLoad(activePort)
+        : { processing: null, deferred: null, reachable: false };
+    const drainAlive =
+      phase === "draining" &&
+      !!marker.old_port &&
+      marker.old_port !== activePort &&
+      isAlive(marker.old_pid ?? null);
+    const oldLive = drainAlive
+      ? await this.liveLoad(marker.old_port ?? null)
+      : { processing: null, deferred: null, reachable: false };
+    const count = (values: Array<number | null>): number | null => {
+      const known = values.filter((value): value is number => typeof value === "number");
+      return known.length ? known.reduce((sum, value) => sum + value, 0) : null;
+    };
+    const events = this.store.listAudit(80);
+    const swapRow = events.find((row) => row.action === "engine.swap");
+    const drainRow = events.find((row) => row.action === "engine.drain");
+    const field = (detail: string, key: string): number | null => {
+      const match = new RegExp(`${key}=(-?\\d+)`).exec(detail);
+      return match ? Number(match[1]) : null;
+    };
+    const base = `http://${this.cfg.adminHost}:${this.cfg.adminPort}`;
+    return {
+      phase,
+      reloading: this.reloading || phase === "warming" || phase === "draining",
+      model_id: state.model_id ?? marker.model_id ?? null,
+      active: {
+        pid: state.pid,
+        port: state.port,
+        status: state.status,
+        alive: activeAlive,
+        started_at: state.started_at,
+        expires_at: state.expires_at,
+        processing: activeLive.processing,
+        deferred: activeLive.deferred,
+      },
+      warming: phase === "warming" ? { since: marker.at ?? null, port: marker.new_port ?? null } : null,
+      draining:
+        phase === "draining"
+          ? {
+              old_pid: marker.old_pid ?? null,
+              old_port: marker.old_port ?? activePort,
+              since: marker.at ?? null,
+              processing: oldLive.processing,
+              deferred: oldLive.deferred,
+              alive: drainAlive,
+            }
+          : null,
+      inflight: {
+        processing: count([activeLive.processing, drainAlive ? oldLive.processing : null]),
+        deferred: count([activeLive.deferred, drainAlive ? oldLive.deferred : null]),
+      },
+      last_swap: swapRow
+        ? {
+            at: swapRow.at,
+            old_pid: field(swapRow.detail, "old_pid"),
+            old_port: field(swapRow.detail, "old_port"),
+            new_pid: field(swapRow.detail, "new_pid"),
+            new_port: field(swapRow.detail, "new_port"),
+          }
+        : null,
+      last_drain: drainRow ? { at: drainRow.at, old_pid: field(drainRow.detail, "old_pid") } : null,
+      last_error: marker.error ?? state.last_error ?? null,
+      stable: {
+        admin_host: this.cfg.adminHost,
+        admin_port: this.cfg.adminPort,
+        base_url: base,
+        openai_base_url: `${base}/v1`,
+        models_url: `${base}/v1/models`,
+        uds_path: this.cfg.udsPath,
+      },
+      checked_at: new Date().toISOString(),
+    };
   }
 
   async props(): Promise<Record<string, unknown> | null> {
@@ -353,8 +576,16 @@ export class EngineManager {
   }
 
   async start(modelId: string, ttlHours?: number | null): Promise<EngineState> {
-    const model = this.store.getModel(modelId);
-    if (!model) throw new Error(`unknown model: ${modelId}`);
+    const model = resolveModel(this.store, modelId);
+    if (!model) {
+      // The CLI usage line says `<model-id>`; listing the real ids turns that
+      // copy/paste mistake into a self-service fix instead of a dead end.
+      const available = this.store.listModels().map((row) => row.model_id);
+      const hint = available.length
+        ? `available models: ${available.join(", ")}`
+        : "no models registered; run `node src/main.ts seed` or add one in the admin UI";
+      throw new Error(`unknown model: ${modelId} (${hint})`);
+    }
     if (!model.path) throw new Error(`model ${modelId} has no file path`);
     const current = await this.status();
     if (current.status === "running") await this.stop();
@@ -521,14 +752,51 @@ export class EngineManager {
     return this.status();
   }
 
+  private reloading = false;
+
+  isReloading(): boolean {
+    return this.reloading;
+  }
+
   async reload(modelId?: string, ttlHours?: number | null): Promise<EngineState> {
     const state = this.store.engineState();
     const target = modelId ?? state.model_id;
     if (!target) throw new Error("no model selected for reload");
     this.progressStarted = Date.now();
     this.emit("reloading", target, "reload requested");
-    await this.stop();
-    return this.start(target, ttlHours);
+    this.reloading = true;
+    try {
+      if (this.serviceMode() !== "none") {
+        // The systemd supervisor owns the child processes, so it performs the
+        // blue-green swap: warm up on the spare port, switch the proxy target,
+        // drain the old engine, then stop it. We wait for its verdict.
+        const id = randomUUID();
+        try {
+          this.store.setSetting(
+            "engine_reload_request",
+            JSON.stringify({ id, model_id: target, ttl_hours: ttlHours ?? null, at: new Date().toISOString() }),
+          );
+          const deadline = Date.now() + 300_000;
+          while (Date.now() < deadline) {
+            const raw = this.store.setting(`engine_reload:${id}`);
+            if (raw) {
+              const result = JSON.parse(raw) as { ok: boolean; error?: string };
+              if (!result.ok) throw new Error(result.error ?? "blue-green reload failed");
+              return this.status();
+            }
+            await sleep(400);
+          }
+          throw new Error("blue-green reload timed out; the supervisor did not answer");
+        } finally {
+          // A client that timed out never reads the verdict; do not leak keys.
+          this.store.setSetting(`engine_reload:${id}`, "");
+        }
+      }
+      await this.stop();
+      return await this.start(target, ttlHours);
+    } finally {
+      this.reloading = false;
+    }
   }
 
   startExpiryLoop(): void {
@@ -552,6 +820,203 @@ export class EngineManager {
     this.timer = null;
   }
 
+  /** Read one pending blue-green request; the key is cleared so it runs once. */
+  private pendingReload(): { id: string; model_id: string; ttl_hours: number | null } | null {
+    const raw = this.store.setting("engine_reload_request");
+    if (!raw) return null;
+    this.store.setSetting("engine_reload_request", "");
+    try {
+      const parsed = JSON.parse(raw) as { id?: string; model_id?: string; ttl_hours?: number | null };
+      if (!parsed.id || !parsed.model_id) return null;
+      return { id: parsed.id, model_id: parsed.model_id, ttl_hours: parsed.ttl_hours ?? null };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Supervisor-side blue-green: warm up, switch, drain, then stop the old child. */
+  private async blueGreen(
+    request: { id: string; model_id: string; ttl_hours: number | null },
+    oldChild: ReturnType<typeof spawn>,
+    oldState: EngineState,
+  ): Promise<ReturnType<typeof spawn> | null> {
+    const report = (ok: boolean, error = ""): void => {
+      this.store.setSetting(`engine_reload:${request.id}`, JSON.stringify({ ok, error }));
+      if (!ok) {
+        // The UI polls this marker; a failed warm-up must leave it idle, not
+        // "warming" forever.
+        this.store.setSetting(
+          "engine_relay",
+          JSON.stringify({ phase: "idle", at: new Date().toISOString(), model_id: request.model_id, error }),
+        );
+      }
+    };
+    const model = this.store.getModel(request.model_id);
+    if (!model?.path) {
+      report(false, `model ${request.model_id} has no file path`);
+      return null;
+    }
+    const oldPort = oldState.port ?? this.cfg.enginePort;
+    const newPort = oldPort === this.cfg.enginePort ? this.cfg.enginePort + 1 : this.cfg.enginePort;
+    const newUds = this.cfg.udsPath ? spareUds(this.cfg.udsPath, newPort) : null;
+    const hours = request.ttl_hours ?? model.ttl_hours;
+    const expiresAt = hours && hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
+    // Phase marker for the admin UI. The supervisor is a separate process, so
+    // the UI cannot see its in-memory state; app_settings is the channel.
+    this.store.setSetting(
+      "engine_relay",
+      JSON.stringify({
+        phase: "warming",
+        at: new Date().toISOString(),
+        model_id: model.id,
+        old_pid: oldChild.pid ?? null,
+        old_port: oldPort,
+        new_port: newPort,
+      }),
+    );
+    if ((await this.healthAt(newPort)).ok) {
+      // Never adopt a listener we did not spawn; that is how a probe on the
+      // spare port once got mistaken for the warm-up engine.
+      report(false, `spare port ${newPort} already has a healthy listener`);
+      return null;
+    }
+    if (newUds) {
+      try {
+        // llama.cpp refuses to bind over a socket file left by a dead instance.
+        fs.rmSync(newUds, { force: true });
+      } catch {
+        // best effort
+      }
+    }
+    const { command, args, logFile } = buildEngineArgs(this.cfg, model, { port: newPort, udsPath: newUds });
+    fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+    const out = fs.openSync(logFile, "a", 0o600);
+    const next = spawn(command, args, { stdio: ["ignore", out, out], env: process.env });
+    fs.closeSync(out);
+    if (!next.pid) {
+      report(false, "failed to spawn the warm-up engine");
+      return null;
+    }
+    this.emit("loading", model.id, `blue-green warm-up on port ${newPort}`);
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      if (next.exitCode !== null || !isAlive(next.pid)) {
+        // Bind failure (for example a socket path llama.cpp refuses) must abort
+        // at once: waiting out the deadline made the reload API hang, and a
+        // foreign listener on the port could satisfy the health probe.
+        report(false, `warm-up engine exited with ${next.exitCode}`);
+        if (newUds) {
+          try {
+            fs.rmSync(newUds, { force: true });
+          } catch {
+            // socket may not exist
+          }
+        }
+        return null;
+      }
+      if ((await this.healthAt(newPort)).ok) break;
+      await sleep(500);
+    }
+    if (Date.now() >= deadline || !isAlive(next.pid)) {
+      try {
+        next.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      report(false, `warm-up engine never became healthy on port ${newPort}`);
+      return null;
+    }
+    if (newUds) {
+      try {
+        fs.chmodSync(path.dirname(newUds), 0o700);
+        fs.chmodSync(newUds, 0o660);
+      } catch {
+        // exotic platforms may not create a UDS
+      }
+    }
+    this.store.setEngineState({
+      model_id: model.id,
+      pid: next.pid,
+      status: "running",
+      started_at: new Date().toISOString(),
+      expires_at: expiresAt,
+      load_mode: model.load_mode,
+      socket_path: this.cfg.udsPath,
+      port: newPort,
+      build: this.binaryVersion(),
+      last_error: null,
+    });
+    this.store.audit(
+      "engine.swap",
+      model.id,
+      `old_pid=${oldChild.pid} old_port=${oldPort} new_pid=${next.pid} new_port=${newPort}`,
+    );
+    this.emit("running", model.id, `blue-green switch to port ${newPort}`);
+    this.store.setSetting(
+      "engine_relay",
+      JSON.stringify({
+        phase: "draining",
+        at: new Date().toISOString(),
+        model_id: model.id,
+        old_pid: oldChild.pid ?? null,
+        old_port: oldPort,
+        new_pid: next.pid ?? null,
+        new_port: newPort,
+      }),
+    );
+    // Drain: keep the old engine alive until it has no request in flight.
+    const drainDeadline = Date.now() + Number(process.env.LAMA_DRAIN_MS || 120_000);
+    while (Date.now() < drainDeadline) {
+      const busy = await this.requestsProcessing(oldPort);
+      if (busy === 0) break;
+      if (busy === null) {
+        await sleep(3000);
+        break;
+      }
+      await sleep(250);
+    }
+    try {
+      oldChild.kill("SIGTERM");
+    } catch {
+      // already gone
+    }
+    const stopDeadline = Date.now() + 10_000;
+    while (Date.now() < stopDeadline && oldChild.exitCode === null) await sleep(250);
+    if (oldChild.exitCode === null) {
+      try {
+        oldChild.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    this.store.audit("engine.drain", model.id, `old_pid=${oldChild.pid} stopped after drain`);
+    this.store.setSetting(
+      "engine_relay",
+      JSON.stringify({ phase: "idle", at: new Date().toISOString(), model_id: model.id }),
+    );
+    // Each blue-green instance binds "<stable>.<port>"; the old file would be a
+    // stale socket for the next warm-up on that port, so remove it after exit.
+    if (this.cfg.udsPath) {
+      try {
+        fs.rmSync(spareUds(this.cfg.udsPath, oldPort), { force: true });
+      } catch {
+        // already gone
+      }
+    }
+    // The stable UDS path was the old engine's socket; point it at the new
+    // engine so clients using the original path follow the swap.
+    if (this.cfg.udsPath && newUds) {
+      try {
+        fs.rmSync(this.cfg.udsPath, { force: true });
+        fs.symlinkSync(newUds, this.cfg.udsPath);
+      } catch (error) {
+        this.store.audit("engine.uds", model.id, (error as Error).message);
+      }
+    }
+    report(true);
+    return next;
+  }
+
   async runForeground(): Promise<never> {
     // Supervisor mode: this process is the systemd unit body. It stays alive,
     // waits for the manager to select a model in engine_state, spawns the stock
@@ -572,8 +1037,15 @@ export class EngineManager {
     process.on("SIGTERM", () => forward("SIGTERM"));
     process.on("SIGINT", () => forward("SIGINT"));
 
+    // A previous supervisor may have died mid-reload. Do not let the UI inherit
+    // a stale warming/draining marker across a process restart.
+    this.store.setSetting(
+      "engine_relay",
+      JSON.stringify({ phase: "idle", at: new Date().toISOString(), model_id: this.store.engineState().model_id }),
+    );
+
     while (!stopping) {
-      const state = this.store.engineState();
+      let state = this.store.engineState();
       if (!state.model_id) {
         await sleep(3000);
         continue;
@@ -582,7 +1054,13 @@ export class EngineManager {
       // already answers on the port, this supervisor stands down: deleting the
       // "stale" socket would unlink the live engine's unix listener.
       const health = await this.health().catch(() => null);
-      if (health?.ok) {
+      // After a blue-green swap the live engine listens on engine_state.port,
+      // which may be the spare port when the unix socket is disabled.
+      const spare =
+        !health?.ok && state.port && state.port !== this.cfg.enginePort
+          ? await this.healthAt(state.port).catch(() => null)
+          : null;
+      if (health?.ok || spare?.ok) {
         await sleep(3000);
         continue;
       }
@@ -606,17 +1084,30 @@ export class EngineManager {
           continue;
         }
         try {
-          if (fs.existsSync(this.cfg.udsPath) && fs.statSync(this.cfg.udsPath).isSocket()) {
+          // After a blue-green swap the stable path is a symlink to the active
+          // engine's socket. If the supervisor restarted and that engine is gone,
+          // the dangling link still makes bind() fail, so unlink the link itself.
+          if (fs.lstatSync(this.cfg.udsPath).isSymbolicLink()) {
+            fs.rmSync(this.cfg.udsPath, { force: true });
+          } else if (fs.statSync(this.cfg.udsPath).isSocket()) {
             fs.rmSync(this.cfg.udsPath, { force: true });
           }
         } catch {
-          // best effort; bind failure is reported by the engine itself
+          // missing path or best-effort removal; bind failure surfaces in the engine log
         }
       }
       this.store.audit("engine.foreground", model.id, `${command} ${args.join(" ")}`);
-      const child = spawn(command, args, { stdio: "inherit", env: process.env });
+      let child = spawn(command, args, { stdio: "inherit", env: process.env });
       current = child;
-      if (child.pid) this.store.setEngineState({ ...state, pid: child.pid, status: "starting" });
+      if (child.pid) {
+        this.store.setEngineState({
+          ...state,
+          pid: child.pid,
+          port: this.cfg.enginePort,
+          socket_path: this.cfg.udsPath,
+          status: "starting",
+        });
+      }
       // The engine creates the socket with the ambient umask; tighten it as soon as it
       // appears, because the unit can be started by systemd without going through start().
       if (this.cfg.udsPath) {
@@ -631,9 +1122,65 @@ export class EngineManager {
           // socket or dir missing; the bind error already surfaced in the engine log
         }
       }
-      const code = await new Promise<number>((resolve) => {
-        child.on("exit", (exitCode, signal) => resolve(exitCode ?? (signal ? 1 : 0)));
-      });
+      // The stored state is what the proxy reads before routing. A supervisor
+      // boot leaves it at "starting" unless somebody writes the healthy result,
+      // and before this the admin API waited 120s on a perfectly healthy engine.
+      const readyDeadline = Date.now() + 60_000;
+      let ready = false;
+      while (!stopping && Date.now() < readyDeadline && child.exitCode === null) {
+        if ((await this.health()).ok) {
+          ready = true;
+          break;
+        }
+        await sleep(300);
+      }
+      if (ready) {
+        this.store.setEngineState({
+          ...state,
+          pid: child.pid ?? null,
+          port: this.cfg.enginePort,
+          socket_path: this.cfg.udsPath,
+          status: "running",
+        });
+        this.store.audit("engine.running", model.id, `pid=${child.pid ?? "unknown"}`);
+      }
+      // The local snapshot predates the spawn (it may still carry the previous
+      // blue-green port); reload decisions must read the row we just wrote.
+      state = this.store.engineState();
+      let exitCode: number | null = null;
+      let handingOver = false;
+      const track = (proc: ReturnType<typeof spawn>): void => {
+        proc.on("exit", (code, signal) => {
+          if (!handingOver && proc === child) exitCode = code ?? (signal ? 1 : 0);
+        });
+      };
+      track(child);
+      while (!stopping && exitCode === null) {
+        // The exit event can be missed when a process dies before the listener is
+        // attached (warm-up handover); the child object is the reliable source.
+        if (child.exitCode !== null) {
+          exitCode = child.exitCode;
+          break;
+        }
+        const request = this.pendingReload();
+        if (request) {
+          handingOver = true;
+          const next = await this.blueGreen(request, child, state);
+          if (next) {
+            child = next;
+            current = next;
+            state = this.store.engineState();
+            exitCode = null;
+            track(next);
+          } else {
+            this.store.audit("engine.reload", request.model_id, "blue-green failed; old engine kept");
+          }
+          handingOver = false;
+          continue;
+        }
+        await sleep(300);
+      }
+      const code = exitCode ?? 0;
       current = null;
       this.store.setEngineState({
         ...state,

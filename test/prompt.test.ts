@@ -86,3 +86,12 @@ test("a missing prompt file is reported instead of inventing content", () => {
   assert.equal(state.prompt, undefined);
   assert.equal(readPromptFile(cfg), null);
 });
+
+test("boot sync keeps exactly one default prompt and drops the legacy seed row", () => {
+  const { store, cfg } = setup();
+  store.upsertPrompt({ id: "default", name: "default", content: "legacy seed prompt", version: 1, is_default: 1, metadata_json: "{}" });
+  syncSystemPrompt(store, cfg);
+  assert.deepEqual(store.listPrompts().map((row) => row.id), ["system"]);
+  assert.equal(store.listPrompts().filter((row) => row.is_default === 1).length, 1);
+  assert.ok(store.listAudit(5).some((row) => row.action === "prompt.prune"));
+});

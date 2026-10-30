@@ -72,9 +72,11 @@ Markdown download.
 - **Telemetry is first-party.** Proxy and playground calls write `request_logs`; MCP tool calls
   write `tool_usage` and bump `mcp_servers.use_count`. Model List, Logs and the MCP matrix read
   those rows, so counts are observed traffic through this admin, not estimates.
-- **The prompt is file-first.** `prompts/lama-system.md` is seeded into `system_prompts` on boot.
-  An admin save bumps the version and marks the row `edited`, so boot sync keeps it; *Reset to
-  file* restores the repo copy. llama.cpp stores no prompt — every caller must send it.
+- **One prompt, file-first.** `prompts/lama-system.md` is the only system prompt (identity + answer
+  rules for every model) and is synced into the single `system_prompts` row on boot; an older
+  duplicate default row is pruned. An admin save bumps the version and marks the row `edited`, so
+  boot sync keeps it; *Reset to file* restores the repo copy. llama.cpp stores no prompt — every
+  caller must send it.
 - **Docs are generated.** `/api/transports/:id/docs` and `.txt` build the connection, OpenAI,
   Anthropic, prompt, parser, error and SSE sections from the live endpoint and model alias.
 - **Integration docs are generated per caller.** `/api/docs/integration` and `.md` emit five

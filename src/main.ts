@@ -4,15 +4,16 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { loadConfig, ensureDirs } from "./config.ts";
 import { detectOs } from "./os.ts";
-import { Store, seedStore } from "./db.ts";
+import { Store, retryDatabaseLocked, seedStore } from "./db.ts";
 import { EngineManager, resolveBinary, mmapStatus } from "./engine.ts";
-import { createAdminServer } from "./admin.ts";
+import { createAdminServer, listenAdminServer, adminHealth } from "./admin.ts";
 import { installLlama, ensureTls, tlsSupport, binaryVersion } from "./installer.ts";
 import { writeEngineMcpConfig } from "./mcp/config.ts";
 import { applySeeds } from "./seed.ts";
 import { ensureIdentityFile } from "./identity.ts";
 import { syncSystemPrompt } from "./prompt.ts";
 import { installService, serviceAction, serviceAvailable } from "./service.ts";
+import { clearToken, downloadFile, fetchRange, getToken, listGgufFiles, maskToken, resolveUrl, setToken } from "./hf.ts";
 
 function usage(): void {
   process.stdout.write(`lama-clean — stock llama.cpp lifecycle manager
@@ -24,14 +25,19 @@ Usage:
   node src/main.ts doctor [--json]
   node src/main.ts serve
   node src/main.ts engine-run
-  node src/main.ts engine load <model-id> [--ttl HOURS]
+  node src/main.ts engine load <model-id|alias> [--ttl HOURS]
   node src/main.ts engine unload
-  node src/main.ts engine reload [model-id] [--ttl HOURS]
+  node src/main.ts engine reload [model-id|alias] [--ttl HOURS]
   node src/main.ts engine status
   node src/main.ts service install user|system [--admin] [--start|--no-start]
   node src/main.ts service start|stop|restart|status user|system [--admin]
   node src/main.ts seed
   node src/main.ts mcp
+  node src/main.ts hf token set [hf_...]   (reads stdin when no argument)
+  node src/main.ts hf token status|clear
+  node src/main.ts hf files <owner/repo>
+  node src/main.ts hf download <owner/repo> [--file NAME]
+  node src/main.ts hf smoke
 
 Environment: .env next to package.json; process.env wins.
 `);
@@ -94,11 +100,31 @@ async function main(): Promise<void> {
   ensureDirs(cfg);
   // The manifest is immutable: create it if missing and force 0444 on every boot.
   ensureIdentityFile(cfg.root);
-  const store = new Store(cfg.dbFile);
-  seedStore(store, cfg, os);
-  syncSystemPrompt(store, cfg);
-  const seedReport = applySeeds(store, cfg, os);
-  writeEngineMcpConfig(store, cfg);
+  // At boot lama-admin and lama-engine both run this bootstrap against one SQLite file.
+  // A transient lock must delay the start, not fail the unit (that was the reset-time
+  // "lama: database is locked" crash loop).
+  let retries = 0;
+  const boot = retryDatabaseLocked(
+    () => {
+      const opened = new Store(cfg.dbFile);
+      seedStore(opened, cfg, os);
+      syncSystemPrompt(opened, cfg);
+      const report = applySeeds(opened, cfg, os);
+      writeEngineMcpConfig(opened, cfg);
+      return { store: opened, report };
+    },
+    {
+      onRetry: (attempt, delay) => {
+        retries = attempt;
+        // Informational, not an error: another lama process holds the SQLite write lock.
+        // The raw SQLite message is only surfaced if every retry is exhausted.
+        process.stderr.write(`lama: manager.db busy at boot (another process holds the SQLite lock) — attempt ${attempt}, retrying in ${delay}ms\n`);
+      },
+    },
+  );
+  if (retries) process.stderr.write(`lama: database lock cleared after ${retries} retr${retries === 1 ? "y" : "ies"}\n`);
+  const store = boot.store;
+  const seedReport = boot.report;
   const engine = new EngineManager(store, cfg, os);
 
   if (command === "setup") {
@@ -182,6 +208,7 @@ async function main(): Promise<void> {
       linkage = { supported: null, detail: (error as Error).message };
     }
     const status = await engine.status();
+    const admin = await adminHealth(cfg.adminHost, cfg.adminPort);
     const report = {
       labels: {
         os: "SOURCE_VERIFIED",
@@ -189,12 +216,14 @@ async function main(): Promise<void> {
         binary: binary ? "LIVE_PROBE_PASSED" : "NOT_TESTED",
         tls: linkage.supported === null ? "UNVERIFIED" : "SOURCE_VERIFIED",
         engine: status.status === "running" ? "LIVE_PROBE_PASSED" : "NOT_TESTED",
+        admin: admin.up ? "LIVE_PROBE_PASSED" : "NOT_TESTED",
       },
       os,
       paths: { root: cfg.root, db: cfg.dbFile, models: cfg.modelsDir, uds: cfg.udsPath, admin: `http://${cfg.adminHost}:${cfg.adminPort}` },
       binary: { path: binary, version, tls: linkage },
       service: { mode: store.setting("service_mode") ?? cfg.serviceMode, available: serviceAvailable(os) },
       engine: status,
+      admin: { url: `http://${cfg.adminHost}:${cfg.adminPort}`, up: admin.up, detail: admin.detail },
       counts: { models: store.listModels().length, mcp: store.listMcp().length, transports: store.listTransports().length, documents: store.listDocuments().length, prompts: store.listPrompts().length },
       warnings: cfg.warnings,
     };
@@ -205,7 +234,7 @@ async function main(): Promise<void> {
       process.stdout.write(`tls       ${linkage.supported === null ? "unknown" : linkage.supported ? "linked" : "not linked"} — ${linkage.detail}\n`);
       process.stdout.write(`engine    ${status.status} pid=${status.pid ?? "-"} mmap=${status.mmap?.mapped ? "yes" : "no"}\n`);
       process.stdout.write(`db        ${cfg.dbFile} models=${report.counts.models} mcp=${report.counts.mcp} docs=${report.counts.documents}\n`);
-      process.stdout.write(`admin     http://${cfg.adminHost}:${cfg.adminPort}\n`);
+      process.stdout.write(`admin     http://${cfg.adminHost}:${cfg.adminPort} ${admin.up ? "up" : "down"} — ${admin.detail}\n`);
       if (cfg.warnings.length) process.stdout.write(`warnings  ${cfg.warnings.join("; ")}\n`);
     }
     if (!binary) process.exitCode = 1;
@@ -217,11 +246,23 @@ async function main(): Promise<void> {
       throw new Error("refusing to serve the admin API without LAMA_ADMIN_TOKEN on a non-loopback host");
     }
     const server = createAdminServer({ store, cfg, os, engine });
-    server.listen(cfg.adminPort, cfg.adminHost, () => {
-      process.stdout.write(`lama admin: http://${cfg.adminHost}:${cfg.adminPort}\n`);
-      process.stdout.write(`engine: ${cfg.engineUrl} (UDS ${cfg.udsPath})\n`);
-      if (!cfg.adminToken) process.stdout.write("warning: LAMA_ADMIN_TOKEN is empty; loopback only\n");
-    });
+    try {
+      await listenAdminServer(server, cfg.adminHost, cfg.adminPort);
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      const owner = failure.code === "EADDRINUSE" ? await adminHealth(cfg.adminHost, cfg.adminPort) : { up: false, detail: "" };
+      if (owner.up) {
+        // Idempotent: a second unit (or a manual run) must not crash-loop the journal.
+        process.stderr.write(`lama: admin already running at http://${cfg.adminHost}:${cfg.adminPort} (${owner.detail}); nothing to do\n`);
+        return;
+      }
+      process.stderr.write(`lama: ${failure.message}\n`);
+      if (owner.detail) process.stderr.write(`lama: the port answers, but not as lama-admin — ${owner.detail}\n`);
+      process.exit(1);
+    }
+    process.stdout.write(`lama admin: http://${cfg.adminHost}:${cfg.adminPort}\n`);
+    process.stdout.write(`engine: ${cfg.engineUrl} (UDS ${cfg.udsPath})\n`);
+    if (!cfg.adminToken) process.stdout.write("warning: LAMA_ADMIN_TOKEN is empty; loopback only\n");
     engine.startExpiryLoop();
     const close = (): void => {
       engine.stopExpiryLoop();
@@ -291,6 +332,108 @@ async function main(): Promise<void> {
   if (command === "mcp") {
     await import("./mcp/server.ts");
     return;
+  }
+
+  if (command === "hf") {
+    const action = rest[0];
+    if (action === "token") {
+      const sub = rest[1];
+      if (sub === "set") {
+        let token = rest[2]?.trim() ?? "";
+        if (!token && !process.stdin.isTTY) {
+          const chunks: Buffer[] = [];
+          for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+          token = Buffer.concat(chunks).toString("utf8").trim();
+        }
+        if (!token) throw new Error("hf token set needs a token (argument or stdin)");
+        setToken(store, token);
+        store.audit("hf.token.set", maskToken(token), "cli");
+        process.stdout.write(`${JSON.stringify({ set: true, preview: maskToken(token) }, null, 2)}\n`);
+        return;
+      }
+      if (sub === "status") {
+        const token = getToken(store);
+        process.stdout.write(`${JSON.stringify({ set: Boolean(token), preview: token ? maskToken(token) : null }, null, 2)}\n`);
+        return;
+      }
+      if (sub === "clear") {
+        clearToken(store);
+        store.audit("hf.token.clear", "", "cli");
+        process.stdout.write(`${JSON.stringify({ set: false }, null, 2)}\n`);
+        return;
+      }
+      throw new Error("hf token action must be set, status or clear");
+    }
+
+    if (action === "files") {
+      const repo = rest[1];
+      if (!repo) throw new Error("hf files needs a repo id, e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF");
+      const files = await listGgufFiles(repo, getToken(store));
+      process.stdout.write(`${JSON.stringify({ repo, files }, null, 2)}\n`);
+      return;
+    }
+
+    if (action === "download") {
+      const repo = rest[1];
+      if (!repo) throw new Error("hf download needs a repo id, e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF");
+      const token = getToken(store);
+      const fileIndex = rest.indexOf("--file");
+      let file = fileIndex >= 0 ? (rest[fileIndex + 1] ?? "") : "";
+      if (!file) {
+        const files = await listGgufFiles(repo, token);
+        const first = files[0];
+        if (files.length === 1 && first) file = first.path;
+        else throw new Error(`${repo} has ${files.length} GGUF files; pass --file <name> (see: node src/main.ts hf files ${repo})`);
+      }
+      let lastWrite = 0;
+      const result = await downloadFile(repo, file, cfg.modelsDir, token, (done, total) => {
+        const stamp = Date.now();
+        if (stamp - lastWrite < 1000 || !total) return;
+        lastWrite = stamp;
+        process.stderr.write(`\rdownloading ${(done / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MiB`);
+      });
+      process.stderr.write("\n");
+      store.audit("hf.download", `${repo}/${file}`, result.path, "cli");
+      process.stdout.write(`${JSON.stringify({ repo, file, ...result }, null, 2)}\n`);
+      return;
+    }
+
+    if (action === "smoke") {
+      const token = getToken(store);
+      const report: Record<string, unknown> = {
+        migration: 0,
+        hf_reachable: false,
+        gguf_files: 0,
+        range_bytes: 0,
+        token: { set: Boolean(token), preview: token ? maskToken(token) : null },
+      };
+      const migration = store.one<{ v: number | null }>("SELECT MAX(version) AS v FROM lama_manager_migrations");
+      report.migration = migration?.v ?? 0;
+      const repo = "Qwen/Qwen2.5-0.5B-Instruct-GGUF";
+      try {
+        const files = await listGgufFiles(repo, token);
+        report.hf_reachable = true;
+        report.gguf_files = files.length;
+        if (files.length > 0) {
+          const first = files[0]!;
+          report.sample_file = first.path;
+          report.range_bytes = await fetchRange(resolveUrl(repo, first.path), token, 1024);
+        }
+      } catch (error) {
+        report.error = error instanceof Error ? error.message : String(error);
+      }
+      const pass =
+        report.migration === 4 &&
+        report.hf_reachable === true &&
+        Number(report.gguf_files) >= 1 &&
+        report.range_bytes === 1024;
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      process.stdout.write(pass ? "HF_CLI_PASS\n" : "HF_CLI_FAIL\n");
+      if (!pass) process.exitCode = 1;
+      return;
+    }
+
+    throw new Error("hf action must be token, files, download or smoke");
   }
 
   usage();

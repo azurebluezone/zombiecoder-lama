@@ -340,13 +340,15 @@ export async function installLlama(
 export function tlsSupport(binary: string, os: OsInfo): { supported: boolean | null; detail: string } {
   if (os.platform === "linux") {
     const result = run("ldd", [binary], 15_000);
-    if (result.status !== 0) return { supported: null, detail: result.text.slice(0, 300) };
+    // ldd exits 1 with this text on a static binary, so the text has to be read
+    // before the status or the honest detail is replaced by raw ldd output.
     if (/not a dynamic executable/i.test(result.text)) {
       return {
         supported: null,
         detail: "binary is statically linked; OpenSSL support cannot be read from ldd — probe TLS at runtime",
       };
     }
+    if (result.status !== 0) return { supported: null, detail: result.text.slice(0, 300) };
     const linked = /libssl|libcrypto/i.test(result.text);
     return {
       supported: linked,

@@ -5,7 +5,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { ensureTls, relinkLocalSymlinks, shipsAssets, tlsSupport } from "../src/installer.ts";
-import { buildEngineArgs, resolveBinary } from "../src/engine.ts";
+import { EngineManager, buildEngineArgs, resolveBinary, resolveModel } from "../src/engine.ts";
+import { Store, seedStore } from "../src/db.ts";
 import { testConfig, testOs } from "./helpers.ts";
 
 const openssl = spawnSync("openssl", ["version"], { encoding: "utf8" }).status === 0;
@@ -80,6 +81,34 @@ test("resolveBinary finds the project bin link created by install:llama", () => 
   }
 });
 
+test("resolveBinary prefers the project bin over an ambient PATH binary", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lama-bin-"));
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const bundled = path.join(binDir, "llama");
+  fs.writeFileSync(bundled, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  // A second llama sits on PATH: the project-local one must still win, otherwise the
+  // same dist artifact runs a different engine depending on the machine it lands on.
+  const ambient = fs.mkdtempSync(path.join(os.tmpdir(), "lama-ambient-"));
+  fs.writeFileSync(path.join(ambient, "llama"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const cfg = testConfig(root);
+  cfg.llamaBin = "";
+  const savedPath = process.env.PATH;
+  const savedHome = process.env.HOME;
+  // Keep /usr/bin reachable so `which` itself still runs: only the llama on PATH differs.
+  process.env.PATH = `${ambient}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+  process.env.HOME = root; // hide any ~/.local/bin install
+  try {
+    const resolved = resolveBinary(cfg);
+    assert.equal(resolved.command, bundled);
+    assert.deepEqual(resolved.prefix, ["serve"]);
+  } finally {
+    process.env.PATH = savedPath;
+    process.env.HOME = savedHome;
+    fs.rmSync(ambient, { recursive: true, force: true });
+  }
+});
+
 test("resolveBinary honours an explicit override and fails loudly", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lama-bin-"));
   const cfg = testConfig(root);
@@ -137,7 +166,54 @@ test("tlsSupport reports static binaries as undetermined instead of guessing", (
     pathSep: "/",
   });
   assert.equal(result.supported, null);
-  assert.match(result.detail, /not a dynamic executable/);
+  // ldd exits 1 on a static binary; the detail must still say why, not paste raw ldd output.
+  assert.match(result.detail, /statically linked/);
+  assert.doesNotMatch(result.detail, /^not a dynamic executable$/);
+});
+
+test("engine load names the model ids that do exist instead of a dead end", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lama-model-"));
+  fs.mkdirSync(path.join(root, "models"), { recursive: true });
+  fs.writeFileSync(path.join(root, "models", "tiny-model.Q4_K_M.gguf"), "not a real model");
+  const cfg = testConfig(root);
+  const store = new Store(cfg.dbFile);
+  seedStore(store, cfg, testOs());
+  const engine = new EngineManager(store, cfg, testOs());
+  assert.equal(store.listModels()[0]?.model_id, "tiny-model-q4-k-m");
+  await assert.rejects(engine.start("<model-id>"), (error: Error) => {
+    assert.match(error.message, /unknown model: <model-id>/);
+    assert.match(error.message, /available models: tiny-model-q4-k-m/);
+    return true;
+  });
+});
+
+test("engine resolves a model by the public alias, not only the row id", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lama-alias-"));
+  const cfg = testConfig(root);
+  const store = new Store(cfg.dbFile);
+  fs.mkdirSync(cfg.modelsDir, { recursive: true });
+  seedStore(store, cfg, testOs());
+  const file = path.join(root, "m.gguf");
+  fs.writeFileSync(file, "not a real model");
+  // The UI, /v1/models and `engine load` users see the alias; the row id is a slug.
+  store.upsertModel({
+    id: "row-id",
+    provider_id: "llamacpp",
+    name: "Row",
+    model_id: "public.alias",
+    path: file,
+    context: 2048,
+    max_tokens: 128,
+    temperature: 0.7,
+    quant: null,
+    load_mode: "auto",
+    ttl_hours: 1,
+    enabled: 1,
+    metadata_json: "{}",
+  });
+  assert.equal(resolveModel(store, "public.alias")?.id, "row-id");
+  assert.equal(resolveModel(store, "row-id")?.model_id, "public.alias");
+  assert.equal(resolveModel(store, "missing"), undefined);
 });
 
 test("shipsAssets skips a release that is still uploading and names the gap", () => {

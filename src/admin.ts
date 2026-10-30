@@ -6,6 +6,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
 import type { EngineManager } from "./engine.ts";
+import { resolveModel } from "./engine.ts";
 import type { EngineTransport, LoadMode, McpTransport, ModelRow, OsInfo, TransportRow } from "./types.ts";
 import { linkSocket, openStream, probeTransport, request } from "./transport.ts";
 import { engineMcpConfig, mcpSummary, writeEngineMcpConfig } from "./mcp/config.ts";
@@ -18,6 +19,14 @@ import { MetricsCollector } from "./metrics.ts";
 import { buildTransportDocs, docsToMarkdown } from "./docs.ts";
 import { buildIntegrationDocs, integrationToMarkdown } from "./integration.ts";
 import { PROMPT_USAGE, promptMeta, readPromptFile, resetSystemPrompt, saveSystemPrompt, syncSystemPrompt } from "./prompt.ts";
+import {
+  clearToken as hfClearToken,
+  downloadFile as hfDownloadFile,
+  getToken as hfGetToken,
+  listGgufFiles as hfListGgufFiles,
+  maskToken as hfMaskToken,
+  setToken as hfSetToken,
+} from "./hf.ts";
 
 interface Context {
   store: Store;
@@ -61,6 +70,66 @@ function text(res: http.ServerResponse, status: number, value: string, type = "t
 
 function fail(res: http.ServerResponse, status: number, message: string): void {
   json(res, status, { error: message });
+}
+
+/**
+ * Bind the admin listener and turn a port collision into one actionable line.
+ * `server.listen()` otherwise emits an unhandled 'error' event, which is how
+ * systemd kept restarting the unit while the journal filled with stack traces.
+ */
+export function listenAdminServer(server: http.Server, host: string, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      server.off("error", onError);
+      server.off("listening", onListening);
+    };
+    const onListening = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: NodeJS.ErrnoException): void => {
+      cleanup();
+      if (error.code === "EADDRINUSE") {
+        error.message = `admin port ${host}:${port} is already in use; find the owner with \`ss -ltnp | grep :${port}\` or set LAMA_ADMIN_PORT`;
+      } else if (error.code === "EACCES") {
+        error.message = `admin port ${host}:${port} needs elevated privileges or is reserved; set LAMA_ADMIN_PORT to a free port`;
+      }
+      reject(error);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
+}
+
+/**
+ * Probe /healthz and accept only this service's own answer. A foreign process
+ * (the legacy JS manager also answers {"ok":true}) must not be mistaken for a
+ * running lama admin, or a second unit would silently stand down.
+ */
+export function adminHealth(host: string, port: number, timeoutMs = 1500): Promise<{ up: boolean; detail: string }> {
+  return new Promise((resolve) => {
+    const req = http.get({ host, port, path: "/healthz", timeout: timeoutMs }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk: string) => {
+        if (body.length < 4096) body += chunk;
+      });
+      res.on("end", () => {
+        let service: string | undefined;
+        try {
+          service = (JSON.parse(body) as { service?: string }).service;
+        } catch {
+          service = undefined;
+        }
+        if (res.statusCode === 200 && service === "lama-admin") resolve({ up: true, detail: "lama-admin healthz 200" });
+        else resolve({ up: false, detail: `port ${port} answered ${res.statusCode ?? "?"} but not as lama-admin` });
+      });
+      res.on("error", (error: Error) => resolve({ up: false, detail: error.message }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`no answer from ${host}:${port} within ${timeoutMs}ms`)));
+    req.on("error", (error: Error) => resolve({ up: false, detail: error.message }));
+  });
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -131,10 +200,10 @@ function staticFile(cfg: Config, pathname: string): { file: string; type: string
 
 function findModel(store: Store, key: string | null | undefined): ModelRow | undefined {
   if (!key) return undefined;
-  const direct = store.getModel(key) ?? store.getModelByModelId(key);
+  const direct = resolveModel(store, key);
   if (direct) return direct;
   const tail = key.includes("/") ? key.slice(key.lastIndexOf("/") + 1) : "";
-  return tail ? store.getModel(tail) ?? store.getModelByModelId(tail) : undefined;
+  return tail ? resolveModel(store, tail) : undefined;
 }
 
 function activeModel(store: Store): ModelRow | undefined {
@@ -149,7 +218,7 @@ function activeAlias(store: Store): string {
 function resolveEndpoint(store: Store, cfg: Config, id: string | null | undefined): Endpoint {
   const row = id ? store.getTransport(id) : undefined;
   if (row) return { id: row.id, protocol: row.protocol, host: row.host, port: row.port, socket_path: row.socket_path };
-  const protocol = id === "uds" || (!id && cfg.udsPath) ? "uds" : process.env.LAMA_TLS === "1" ? "https" : "http";
+  const protocol = id === "uds" || (!id && cfg.udsPath) ? "uds" : cfg.tls ? "https" : "http";
   if (protocol === "uds" && cfg.udsPath) {
     return { id: "uds", protocol: "uds", host: null, port: null, socket_path: cfg.udsPath };
   }
@@ -308,20 +377,30 @@ export function createAdminServer(ctx: Context): http.Server {
     return row;
   };
 
-  const proxyToEngine = async (req: http.IncomingMessage, res: http.ServerResponse, urlPath: string): Promise<void> => {
-    const started = Date.now();
-    const chunks: Buffer[] = [];
-    let received = 0;
-    for await (const chunk of req) {
-      const buffer = Buffer.from(chunk);
-      received += buffer.length;
-      if (received > 4 * 1024 * 1024) {
-        fail(res, 400, "request body exceeds 4 MiB");
-        return;
+  const proxyToEngine = async (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    urlPath: string,
+    resumed?: { raw: Buffer; started: number },
+  ): Promise<void> => {
+    const started = resumed?.started ?? Date.now();
+    let raw: Buffer;
+    if (resumed) {
+      raw = resumed.raw;
+    } else {
+      const chunks: Buffer[] = [];
+      let received = 0;
+      for await (const chunk of req) {
+        const buffer = Buffer.from(chunk);
+        received += buffer.length;
+        if (received > 4 * 1024 * 1024) {
+          fail(res, 400, "request body exceeds 4 MiB");
+          return;
+        }
+        chunks.push(buffer);
       }
-      chunks.push(buffer);
+      raw = Buffer.concat(chunks);
     }
-    const raw = Buffer.concat(chunks);
     let payload: Record<string, unknown> | null = null;
     try {
       payload = raw.length ? (JSON.parse(raw.toString("utf8")) as Record<string, unknown>) : null;
@@ -332,10 +411,14 @@ export function createAdminServer(ctx: Context): http.Server {
     const alias = typeof payload?.model === "string" ? payload.model : activeAlias(store);
     const protocol = urlPath.startsWith("/v1/messages") ? "anthropic" : "openai";
     const stream = payload?.stream === true;
-    const transportId = process.env.LAMA_TLS === "1" ? "https" : "http";
+    const transportId = cfg.tls ? "https" : "http";
     const endpoint = store.getTransport(transportId) ? transportId : null;
 
     const target = new URL(cfg.engineUrl);
+    const engineState = store.engineState();
+    // Blue-green reload moves the live engine to the spare port; the proxy
+    // follows engine_state.port instead of the boot-time URL.
+    if (engineState.status === "running" && engineState.port) target.port = String(engineState.port);
     const headers: http.OutgoingHttpHeaders = { ...req.headers };
     delete headers.host;
     headers["content-length"] = String(raw.length);
@@ -370,6 +453,26 @@ export function createAdminServer(ctx: Context): http.Server {
       }
     };
 
+    // Reload = systemd restart: the engine is briefly absent by design. Hold
+    // client requests until it is back instead of answering 502, so a stable
+    // base URL survives model swaps.
+    const waitForReady = async (): Promise<boolean> => {
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        const state = store.engineState();
+        if (state.status === "running") return true;
+        if (!engine.isReloading() && state.status !== "starting") return false;
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      return false;
+    };
+    if (engine.isReloading() || store.engineState().status === "starting") {
+      if (!(await waitForReady())) {
+        fail(res, 503, "engine is reloading; retry shortly");
+        return;
+      }
+    }
+
     const upstream = client.request(
       {
         protocol: target.protocol,
@@ -378,6 +481,10 @@ export function createAdminServer(ctx: Context): http.Server {
         path: `${urlPath}`,
         method: req.method,
         headers,
+        // Stock llama.cpp closes streaming sockets without announcing it; a
+        // reused keep-alive socket then dies with ECONNRESET. One fresh
+        // upstream connection per proxied request removes that failure mode.
+        agent: false,
         rejectUnauthorized: process.env.LAMA_TLS_INSECURE !== "1",
       },
       (upstreamRes) => {
@@ -404,6 +511,20 @@ export function createAdminServer(ctx: Context): http.Server {
       },
     );
     upstream.on("error", (error: Error) => {
+      // A reload can kill the upstream between the readiness check and the
+      // connect. Wait for the restarted engine, then replay the buffered
+      // request instead of leaking a reset to the client.
+      if (!res.headersSent && (engine.isReloading() || store.engineState().status === "starting")) {
+        void waitForReady().then((ready) => {
+          if (ready) {
+            void proxyToEngine(req, res, urlPath, { raw, started });
+            return;
+          }
+          fail(res, 503, "engine reload finished without a running engine");
+          finish(503, "", 0, error.message);
+        });
+        return;
+      }
       if (!res.headersSent) fail(res, 502, `engine unreachable: ${error.message}`);
       else res.destroy();
       finish(502, "", 0, error.message);
@@ -507,7 +628,7 @@ export function createAdminServer(ctx: Context): http.Server {
             models_dir: cfg.modelsDir,
             engine_url: cfg.engineUrl,
             uds_path: cfg.udsPath,
-            tls: { key: cfg.tlsKey, cert: cfg.tlsCert, enabled: process.env.LAMA_TLS === "1" },
+            tls: { key: cfg.tlsKey, cert: cfg.tlsCert, enabled: cfg.tls },
             service_mode: store.setting("service_mode") ?? cfg.serviceMode,
             gateway_dir: cfg.gatewayDir,
           },
@@ -575,6 +696,13 @@ export function createAdminServer(ctx: Context): http.Server {
         return;
       }
 
+      // Cheap snapshot for the runtime hero panel: phase, both engines, real
+      // in-flight gauges and stable endpoints (polled about once per second).
+      if (method === "GET" && pathname === "/api/engine/relay") {
+        json(res, 200, await engine.relayStatus());
+        return;
+      }
+
       if (method === "POST" && pathname === "/api/engine/load") {
         const input = await body(req);
         const modelId = str(input.model_id, "model_id", 200);
@@ -631,6 +759,14 @@ export function createAdminServer(ctx: Context): http.Server {
         if (!name) throw new Error("name is required for a new model");
         const providerId = typeof input.provider_id === "string" && input.provider_id.trim() ? input.provider_id.trim() : existing?.provider_id ?? "llamacpp";
         if (!store.getProvider(providerId)) throw new Error(`unknown provider_id: ${providerId}`);
+        const modelKey =
+          typeof input.model_id === "string" && input.model_id.trim()
+            ? input.model_id.trim()
+            : existing?.model_id ?? id;
+        // UNIQUE(provider_id, model_id): two rows with one alias would make
+        // engine resolution ambiguous, so reject the clash here, in words.
+        const clash = store.listModels().find((row) => row.id !== id && row.provider_id === providerId && row.model_id === modelKey);
+        if (clash) throw new Error(`model_id "${modelKey}" is already registered as "${clash.id}"; pick another alias`);
         const pathValue =
           typeof input.path === "string" && input.path.trim() ? input.path.trim() : existing?.path ?? "";
         if (!pathValue) throw new Error("path is required for a new model");
@@ -640,10 +776,7 @@ export function createAdminServer(ctx: Context): http.Server {
           id,
           provider_id: providerId,
           name,
-          model_id:
-            typeof input.model_id === "string" && input.model_id.trim()
-              ? input.model_id.trim()
-              : existing?.model_id ?? id,
+          model_id: modelKey,
           path: pathValue,
           context: num(input.context, "context", existing?.context ?? 4096, 256, 1_048_576),
           max_tokens: num(input.max_tokens, "max_tokens", existing?.max_tokens ?? 1024, 1, 1_048_576),
@@ -675,6 +808,73 @@ export function createAdminServer(ctx: Context): http.Server {
         store.deleteModel(id);
         store.audit("model.delete", id, "", "admin");
         json(res, 200, { ok: true });
+        return;
+      }
+
+      // ---------- hugging face (token + GGUF downloads) ----------
+      if (method === "GET" && pathname === "/api/hf/token") {
+        const token = hfGetToken(store);
+        json(res, 200, { set: Boolean(token), preview: token ? hfMaskToken(token) : null });
+        return;
+      }
+
+      if (method === "PUT" && pathname === "/api/hf/token") {
+        const input = await body(req);
+        const token = typeof input.token === "string" ? input.token.trim() : "";
+        if (!token) return fail(res, 400, "token is required");
+        hfSetToken(store, token);
+        store.audit("hf.token.set", hfMaskToken(token), "admin");
+        json(res, 200, { set: true, preview: hfMaskToken(token) });
+        return;
+      }
+
+      if (method === "DELETE" && pathname === "/api/hf/token") {
+        hfClearToken(store);
+        store.audit("hf.token.clear", "", "admin");
+        json(res, 200, { set: false });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/hf/files") {
+        const repo = (url.searchParams.get("repo") ?? "").trim();
+        if (!repo) return fail(res, 400, "repo query parameter is required, e.g. ?repo=Qwen/Qwen2.5-0.5B-Instruct-GGUF");
+        const files = await hfListGgufFiles(repo, hfGetToken(store));
+        json(res, 200, { repo, files });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/api/hf/downloads") {
+        json(res, 200, { downloads: store.listDownloads() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/api/models/download") {
+        const input = await body(req);
+        const repo = str(input.repo, "repo", 300);
+        const file = str(input.file, "file", 300);
+        const token = hfGetToken(store);
+        const row = store.startDownload(repo, file, path.join(cfg.modelsDir, path.basename(file)));
+        json(res, 202, row);
+        // The transfer runs in the background; progress lands in model_downloads
+        // and fans out over the existing SSE hub, so the UI polls nothing new.
+        void (async () => {
+          let lastWrite = 0;
+          try {
+            const result = await hfDownloadFile(repo, file, cfg.modelsDir, token, (done, total) => {
+              const stamp = Date.now();
+              if (stamp - lastWrite < 1000) return;
+              lastWrite = stamp;
+              store.updateDownload(row.id, done, total);
+              hub.broadcast("download", store.downloadRow(row.id));
+            });
+            store.finishDownload(row.id, result.path, result.bytes);
+            store.audit("hf.download", `${repo}/${file}`, result.path, "admin");
+            hub.broadcast("download", store.downloadRow(row.id));
+          } catch (error) {
+            store.failDownload(row.id, error instanceof Error ? error.message : String(error));
+            hub.broadcast("download", store.downloadRow(row.id));
+          }
+        })();
         return;
       }
 

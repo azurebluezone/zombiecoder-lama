@@ -32,6 +32,7 @@ export interface Config {
   build: string | null;
   tlsKey: string;
   tlsCert: string;
+  tls: boolean;
   serviceMode: "none" | "user" | "system";
   gatewayDir: string;
   defaultTtlHours: number;
@@ -152,6 +153,9 @@ export function loadConfig(): Config {
     build: env("LAMA_LLAMA_BUILD") || null,
     tlsKey: path.resolve(env("LAMA_SSL_KEY") || path.join(certsDir, "localhost-key.pem")),
     tlsCert: path.resolve(env("LAMA_SSL_CERT") || path.join(certsDir, "localhost-cert.pem")),
+    // One flag decides engine args, transport choice and admin proxy protocol.
+    // Reading process.env directly made a .env value invisible to short-lived CLI runs.
+    tls: flag(env("LAMA_TLS"), false),
     serviceMode,
     gatewayDir: path.resolve(env("LAMA_GATEWAY_DIR") || path.join(root, "gateway")),
     defaultTtlHours: number(env("LAMA_DEFAULT_TTL_HOURS"), 4),

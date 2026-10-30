@@ -31,7 +31,7 @@ test("migration v3 creates request_logs, tool_usage, mcp_tools and the MCP statu
     .prepare("SELECT version FROM lama_manager_migrations ORDER BY version")
     .all()
     .map((row) => (row as { version: number }).version);
-  assert.deepEqual(versions, [1, 2, 3]);
+  assert.deepEqual(versions, [1, 2, 3, 4]);
 
   const mcpColumns = store.db
     .prepare("PRAGMA table_info(mcp_servers)")

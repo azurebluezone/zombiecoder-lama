@@ -15,6 +15,7 @@ export type HubEvent =
   | "metrics"
   | "mcp"
   | "tool"
+  | "download"
   | "ping";
 
 interface Client {

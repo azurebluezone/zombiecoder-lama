@@ -26,7 +26,9 @@ node scripts/lamactl.mjs load llama-3-2-1b-instruct-abliterated-q5-k-s
 node scripts/lamactl.mjs requests 5
 ```
 
-Admin UI: `http://127.0.0.1:9933/` (current TypeScript admin; this legacy file no longer serves HTML)
+Admin UI: `http://127.0.0.1:9933/` (current TypeScript admin; this legacy file no longer serves HTML).
+The legacy manager refuses to bind the same port as `LAMA_ADMIN_PORT` (both default to 9933): run it
+with `LAMA_MGMT_PORT=9934` when you need its `/v1` proxy next to the current admin.
 
 ## Run (Windows)
 

@@ -21,6 +21,9 @@ const state = {
   logPaused: false,
   metrics: null,
   progress: null,
+  relay: null,
+  relayTimer: null,
+  reloadBusy: false,
   transport: null,
   transportLoading: false,
   events: null,
@@ -431,6 +434,10 @@ function onEvent(event, payload) {
     deferredRefresh(1500);
     return;
   }
+  if (event === "download") {
+    hfApplyRow(payload);
+    return;
+  }
   if (event === "mcp") {
     pushLog({ kind: "mcp", at: new Date().toISOString(), text: `${payload.name || payload.id} · ${payload.status || "unknown"}${payload.last_probe_detail ? ` · ${payload.last_probe_detail}` : ""}` });
     deferredRefresh(1200);
@@ -538,7 +545,7 @@ function renderOverview() {
   setText("#statLoadedNote", engine.expires_at ? `expires ${fmtTime(engine.expires_at)}` : engine.model_id ? "no expiry" : "nothing loaded");
 
   setTag("#dashMode", engine.status === "running" ? "ENGINE UP" : "ENGINE IDLE", engine.status === "running" ? "green" : "amber");
-  setText("#dashEngine", data.config.engine_url);
+  setText("#dashEngine", `${location.origin}/v1 · stable`);
   setText("#dashAdmin", location.origin);
   setText("#dashUds", data.config.uds_path || "disabled");
   setText("#dashDb", data.config.db);
@@ -628,6 +635,7 @@ function renderModels() {
   grid.textContent = "";
   for (const model of rows) grid.append(modelCard(model, model.id === engine.model_id));
   $("#modelsEmpty").style.display = rows.length ? "none" : "";
+  renderHf();
 }
 
 function modelCard(model, active) {
@@ -676,6 +684,124 @@ function modelCard(model, active) {
   if (stats.last_at) card.append(el("div", { class: "model-card-meta", text: `last request ${fmtTime(stats.last_at)}` }));
   return card;
 }
+
+/* ---------- hugging face downloads ---------- */
+
+const hf = { token: { set: false, preview: null }, downloads: [], seen: new Map() };
+
+async function hfRefreshToken() {
+  try {
+    hf.token = await api("/api/hf/token");
+  } catch {
+    return;
+  }
+  const badge = $("#hfTokenBadge");
+  badge.textContent = hf.token.set ? `TOKEN ${hf.token.preview}` : "NO TOKEN";
+  badge.className = hf.token.set ? "tag green" : "tag amber";
+}
+
+function hfRenderDownloads() {
+  const box = $("#hfDownloads");
+  box.textContent = "";
+  if (!hf.downloads.length) {
+    box.append(el("div", { class: "model-card-meta", text: "No downloads yet — paste a token (optional for public repos), list a repo, pick a file." }));
+    return;
+  }
+  for (const row of hf.downloads) {
+    const pct = row.bytes_total ? Math.min(100, Math.round((row.bytes_done / row.bytes_total) * 100)) : 0;
+    const doneMiB = (row.bytes_done / 1048576).toFixed(1);
+    const totalMiB = row.bytes_total ? ` / ${(row.bytes_total / 1048576).toFixed(1)} MiB` : "";
+    const color = row.status === "failed" ? "red" : row.status === "done" ? "green" : "amber";
+    const line = el("div", { class: "model-card-meta mono" });
+    line.append(
+      tag(row.status, color),
+      ` ${row.repo}/${row.file} · ${pct}% · ${doneMiB}${totalMiB}${row.error ? ` · ${row.error}` : ""}`,
+    );
+    box.append(line);
+  }
+}
+
+async function hfRefreshDownloads() {
+  try {
+    const data = await api("/api/hf/downloads");
+    hf.downloads = data.downloads || [];
+  } catch {
+    return;
+  }
+  let finished = false;
+  for (const row of hf.downloads) {
+    const before = hf.seen.get(row.id);
+    if (row.status === "done" && before && before !== "done") finished = true;
+    hf.seen.set(row.id, row.status);
+  }
+  hfRenderDownloads();
+  if (finished) deferredRefresh(800);
+}
+
+function hfApplyRow(row) {
+  if (!row || row.id === undefined) return;
+  const index = hf.downloads.findIndex((item) => item.id === row.id);
+  const before = index >= 0 ? hf.downloads[index].status : null;
+  if (index >= 0) hf.downloads[index] = row;
+  else hf.downloads.unshift(row);
+  hfRenderDownloads();
+  if (row.status === "done" && before && before !== "done") deferredRefresh(800);
+}
+
+async function renderHf() {
+  await Promise.all([hfRefreshToken().catch(() => {}), hfRefreshDownloads().catch(() => {})]);
+}
+
+$("#hfTokenSave").addEventListener("click", async () => {
+  const token = $("#hfTokenInput").value.trim();
+  if (!token) return toast("Paste a Hugging Face token first", true);
+  try {
+    await api("/api/hf/token", { method: "PUT", body: { token } });
+    $("#hfTokenInput").value = "";
+    toast("HF token saved in the admin database");
+    hfRefreshToken();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+$("#hfTokenClear").addEventListener("click", async () => {
+  try {
+    await api("/api/hf/token", { method: "DELETE" });
+    toast("HF token cleared");
+    hfRefreshToken();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+$("#hfList").addEventListener("click", async () => {
+  const repo = $("#hfRepo").value.trim();
+  if (!repo) return toast("Type a repo id first, e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF", true);
+  try {
+    const data = await api(`/api/hf/files?repo=${encodeURIComponent(repo)}`);
+    fillSelect(
+      $("#hfFile"),
+      data.files.map((file) => ({ value: file.path, label: `${file.path}${file.size ? ` · ${(file.size / 1048576).toFixed(1)} MiB` : ""}` })),
+    );
+    toast(`${data.files.length} GGUF file(s)`);
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+$("#hfDownload").addEventListener("click", async () => {
+  const repo = $("#hfRepo").value.trim();
+  const file = $("#hfFile").value;
+  if (!repo || !file) return toast("List the repo and pick a file first", true);
+  try {
+    await api("/api/models/download", { method: "POST", body: { repo, file } });
+    toast(`Download started: ${file}`);
+    hfRefreshDownloads();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
 
 /* ---------- chat ---------- */
 
@@ -1012,6 +1138,167 @@ function renderProgress() {
   bar.style.width = `${percent}%`;
   bar.style.background = progress.phase === "error" ? "var(--red)" : progress.phase === "running" ? "var(--green)" : "var(--amber)";
   $("#progressElapsed").textContent = progress.elapsed_ms ? `${(progress.elapsed_ms / 1000).toFixed(1)} s since the transition started` : "—";
+}
+
+/* ---------- zero-downtime relay panel ---------- */
+
+function relayStep(name, stepState, note) {
+  const node = $(`#relaySteps [data-step="${name}"]`);
+  if (!node) return;
+  node.dataset.state = stepState;
+  node.setAttribute("aria-current", stepState === "active" ? "step" : "false");
+  if (note !== undefined) {
+    const small = node.querySelector("small");
+    if (small) small.textContent = note;
+  }
+}
+
+async function loadRelay() {
+  if (!state.token) return;
+  try {
+    state.relay = await api("/api/engine/relay");
+    renderRelay();
+  } catch {
+    // Polling must never break the page; the next tick retries.
+  }
+}
+
+function startRelayPolling() {
+  if (state.relayTimer) return;
+  state.relayTimer = setInterval(() => {
+    if (document.hidden || !state.token) return;
+    if ($("#modalBackdrop") && $("#modalBackdrop").classList.contains("open")) return;
+    void loadRelay();
+  }, 1200);
+  void loadRelay();
+}
+
+function renderRelay() {
+  const panel = $("#relayPanel");
+  const relay = state.relay;
+  if (!panel || !relay) return;
+  const phase = relay.phase === "warming" || relay.phase === "draining" ? relay.phase : "idle";
+  const recent = Boolean(
+    relay.last_swap && Number.isFinite(Date.parse(relay.last_swap.at)) && Date.now() - Date.parse(relay.last_swap.at) < 120_000,
+  );
+  const failed = phase === "idle" && Boolean(relay.last_error);
+  panel.dataset.phase = failed ? "error" : phase;
+
+  const labels =
+    phase === "warming"
+      ? ["Warming up", "amber"]
+      : phase === "draining"
+        ? ["Draining", "amber"]
+        : failed
+          ? ["Idle · error", "red"]
+          : recent
+            ? ["Swapped", "green"]
+            : ["Idle", "green"];
+  const phaseTag = $("#relayPhase");
+  phaseTag.className = `tag relay-phase ${labels[1]}`;
+  phaseTag.textContent = "";
+  phaseTag.append(el("span", { class: "dot" }), ` ${labels[0]}`);
+
+  const activeNote = relay.active?.pid ? `pid ${relay.active.pid} · :${relay.active.port}` : "no engine";
+  if (phase === "warming") {
+    relayStep("warmup", "active", `warming a spare engine${relay.warming?.port ? ` on :${relay.warming.port}` : ""}…`);
+    relayStep("switch", "pending", "waits for a healthy spare");
+    relayStep("drain", "pending", "old engine finishes in-flight work");
+    relayStep("retire", "pending", "old pid stops last");
+  } else if (phase === "draining") {
+    const drain = relay.draining;
+    relayStep("warmup", "done", "new engine healthy");
+    relayStep("switch", "done", `traffic now on pid ${relay.active?.pid ?? "?"}`);
+    relayStep("drain", "active", `${drain?.processing ?? "?"} in flight on old pid ${drain?.old_pid ?? "?"}`);
+    relayStep("retire", "pending", "SIGTERM after the last request");
+  } else if (recent) {
+    const swap = relay.last_swap;
+    relayStep("warmup", "done", `pid ${swap.new_pid ?? "?"} healthy on :${swap.new_port ?? "?"}`);
+    relayStep("switch", "done", `pid ${swap.old_pid ?? "?"} → ${swap.new_pid ?? "?"}`);
+    relayStep("drain", "done", `old pid ${swap.old_pid ?? "?"} drained`);
+    relayStep("retire", "done", "old pid gone · stable URL untouched");
+  } else if (failed) {
+    relayStep("warmup", "error", short(relay.last_error, 70));
+    relayStep("switch", "pending", "previous engine kept serving");
+    relayStep("drain", "pending", "nothing to drain");
+    relayStep("retire", "pending", "nothing retired");
+  } else {
+    relayStep("warmup", "pending", "spare engine not started");
+    relayStep("switch", "pending", "proxy follows the healthy engine");
+    relayStep("drain", "pending", "old engine finishes in-flight work");
+    relayStep("retire", "pending", "old pid stops");
+  }
+
+  const processing = relay.inflight?.processing;
+  setText("#relayInflight", typeof processing === "number" ? String(processing) : "—");
+  const inflightNote =
+    phase === "draining"
+      ? `old ${relay.draining?.processing ?? "?"} · new ${relay.active?.processing ?? "?"} processing`
+      : phase === "warming"
+        ? `active ${relay.active?.processing ?? "?"} · spare takes no traffic yet`
+        : "live requests_processing";
+  setText("#relayInflightNote", inflightNote);
+  setText("#relayActive", activeNote);
+  setText(
+    "#relayDraining",
+    relay.draining
+      ? `pid ${relay.draining.old_pid ?? "?"} · :${relay.draining.old_port} · ${relay.draining.processing ?? "?"} left`
+      : "none",
+  );
+  setText(
+    "#relayLastSwap",
+    relay.last_swap
+      ? `${timeOnly(relay.last_swap.at)} · ${relay.last_swap.old_pid ?? "?"} → ${relay.last_swap.new_pid ?? "?"} · :${relay.last_swap.new_port ?? "?"}`
+      : "never",
+  );
+
+  const endpoint = relay.stable?.openai_base_url || `${location.origin}/v1`;
+  setText("#relayEndpoint", endpoint);
+  setText("#relayUds", relay.stable?.uds_path || "disabled");
+
+  const description =
+    phase === "warming"
+      ? `Warming a second engine on port ${relay.warming?.port ?? "?"}. Clients keep using the stable URL; no request is cut yet.`
+      : phase === "draining"
+        ? `Traffic moved to pid ${relay.active?.pid ?? "?"} on port ${relay.active?.port ?? "?"}. Old pid ${relay.draining?.old_pid ?? "?"} is finishing ${relay.draining?.processing ?? "?"} in-flight request(s), then it retires.`
+        : failed
+          ? `Last reload failed: ${relay.last_error}. The running engine was never cut.`
+          : recent
+            ? `Last swap ${timeOnly(relay.last_swap.at)}: old pid ${relay.last_swap.old_pid ?? "?"} drained and retired; pid ${relay.last_swap.new_pid ?? "?"} is serving on port ${relay.last_swap.new_port ?? "?"}.`
+            : "Ready. One click warms a spare engine, switches traffic, drains the old engine and retires it — the stable URL never changes.";
+  setText("#relayDesc", description);
+
+  const busy = Boolean(relay.reloading);
+  const relayButton = $("#relayReload");
+  if (relayButton) {
+    relayButton.disabled = busy || state.reloadBusy;
+    relayButton.textContent = busy || state.reloadBusy ? "Reloading…" : "⚡ Reload without downtime";
+  }
+  const runtimeButton = $("#rtReload");
+  if (runtimeButton) {
+    runtimeButton.disabled = busy || state.reloadBusy;
+    runtimeButton.textContent = busy || state.reloadBusy ? "Reloading…" : "Reload";
+  }
+}
+
+async function startReload(modelId, ttlHours) {
+  if (state.reloadBusy) return toast("a reload is already running", true);
+  state.reloadBusy = true;
+  renderRelay();
+  try {
+    toast("reloading — warm up, switch, drain…");
+    await api("/api/engine/reload", { method: "POST", body: { model_id: modelId, ttl_hours: ttlHours } });
+    await loadState({ quiet: true });
+    await loadRelay();
+    toast("reload complete — old engine retired after drain");
+  } catch (error) {
+    await loadState({ quiet: true }).catch(() => {});
+    await loadRelay();
+    toast(error.message, true);
+  } finally {
+    state.reloadBusy = false;
+    renderRelay();
+  }
 }
 
 /* ---------- transports ---------- */
@@ -1761,10 +2048,7 @@ const ACTIONS = {
     toast("engine started");
   },
   "model-reload": async (id) => {
-    toast("reloading engine…");
-    await api("/api/engine/reload", { method: "POST", body: { model_id: id } });
-    await loadState({ quiet: true });
-    toast("engine reloaded");
+    await startReload(id);
   },
   "model-edit": (id) => modelForm(state.data.models.find((row) => row.id === id)),
   "model-delete": async (id) => {
@@ -1885,12 +2169,23 @@ function showView(name) {
   if (location.hash !== `#${name}`) history.replaceState(null, "", `#${name}`);
   $("#sidebar").classList.remove("open");
   if (state.data) renderView(name);
+  if (name === "runtime") void loadRelay();
 }
 
 document.addEventListener("click", (event) => {
   const go = event.target.closest("[data-view],[data-go]");
   if (!go) return;
   showView(go.dataset.view || go.dataset.go);
+});
+
+document.addEventListener("click", (event) => {
+  const copy = event.target.closest("[data-copy]");
+  if (!copy) return;
+  const node = document.getElementById(copy.dataset.copy);
+  if (!node) return;
+  const value = (node.textContent || "").trim();
+  if (!value || value === "—") return toast("nothing to copy yet", true);
+  void copyText(value, copy.dataset.copyLabel || "value");
 });
 
 $("#mobileMenu").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
@@ -1943,15 +2238,9 @@ $("#rtLoad").addEventListener("click", async () => {
 $("#rtReload").addEventListener("click", async () => {
   const modelId = $("#rtModel").value || undefined;
   const ttl = $("#rtTtl").value === "" ? undefined : Number($("#rtTtl").value);
-  try {
-    toast("reloading engine…");
-    await api("/api/engine/reload", { method: "POST", body: { model_id: modelId, ttl_hours: ttl } });
-    await loadState({ quiet: true });
-    toast("engine reloaded");
-  } catch (error) {
-    toast(error.message, true);
-  }
+  await startReload(modelId, ttl);
 });
+$("#relayReload").addEventListener("click", () => void startReload());
 $("#rtUnload").addEventListener("click", async () => {
   try {
     await api("/api/engine/unload", { method: "POST" });
@@ -2189,6 +2478,7 @@ document.addEventListener("keydown", (event) => {
 
 renderChatTranscript();
 showView(state.view);
+startRelayPolling();
 if (!state.token) {
   lock("");
 } else {

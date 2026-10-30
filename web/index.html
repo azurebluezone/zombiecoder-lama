@@ -196,6 +196,18 @@
                             <p>Change the search or register a GGUF file.</p>
                         </div>
                     </div>
+                    <div class="panel" style="margin-top:16px">
+                        <div class="panel-head">
+                            <div>
+                                <div class="panel-title">Hugging Face downloads</div>
+                                <div class="panel-desc">The token lives in the admin database, masked in every log; GGUF files land in the models directory and register through Discover.</div>
+                            </div><span class="tag" id="hfTokenBadge">—</span>
+                        </div>
+                        <div class="form-row" style="margin-bottom:10px"><label>TOKEN</label><input class="field" id="hfTokenInput" type="password" placeholder="hf_… paste to save"><button class="btn" id="hfTokenSave">Save</button><button class="btn" id="hfTokenClear">Clear</button></div>
+                        <div class="form-row" style="margin-bottom:10px"><label>REPO</label><input class="field" id="hfRepo" placeholder="owner/repo, e.g. Qwen/Qwen2.5-0.5B-Instruct-GGUF"><button class="btn" id="hfList">List GGUF</button></div>
+                        <div class="form-row" style="margin-bottom:10px"><label>FILE</label><select class="field" id="hfFile"></select><button class="btn green" id="hfDownload">Download</button></div>
+                        <div id="hfDownloads"></div>
+                    </div>
                 </section>
 
                 <section class="view" id="view-chat">
@@ -241,6 +253,51 @@
                             <p class="sub">Single-model engine: load, reload, TTL expiry and live memory.</p>
                         </div>
                         <div><button class="btn" id="runtimeRefresh">↻ Refresh runtime</button><button class="btn" data-go="models">Manage models</button></div>
+                    </div>
+                    <div class="panel relay-hero" id="relayPanel" data-phase="idle">
+                        <div class="relay-hero-head">
+                            <div class="relay-hero-copy">
+                                <div class="relay-eyebrow"><span class="relay-spark" aria-hidden="true"></span> Zero-downtime reload</div>
+                                <div class="panel-title relay-title" id="relayTitle">Swap the engine without dropping a request</div>
+                                <p class="panel-desc" id="relayDesc">A second engine warms up on the spare port. Traffic moves only after it is healthy; the old engine drains in-flight work, then retires.</p>
+                            </div>
+                            <div class="relay-hero-actions">
+                                <span class="tag relay-phase" id="relayPhase" role="status" aria-live="polite"><span class="dot"></span> Idle</span>
+                                <button class="btn green relay-cta" id="relayReload" title="Warm up, switch and drain in one click">⚡ Reload without downtime</button>
+                            </div>
+                        </div>
+                        <div class="relay-grid">
+                            <ol class="relay-steps" id="relaySteps" aria-label="Reload timeline">
+                                <li class="relay-step" data-step="warmup" data-state="pending" aria-current="false"><span class="relay-step-dot">1</span><div class="relay-step-text"><strong>Warm up</strong><small id="relayStepWarmup">spare engine not started</small></div></li>
+                                <li class="relay-step" data-step="switch" data-state="pending" aria-current="false"><span class="relay-step-dot">2</span><div class="relay-step-text"><strong>Switch</strong><small id="relayStepSwitch">proxy follows the healthy engine</small></div></li>
+                                <li class="relay-step" data-step="drain" data-state="pending" aria-current="false"><span class="relay-step-dot">3</span><div class="relay-step-text"><strong>Drain</strong><small id="relayStepDrain">old engine finishes in-flight work</small></div></li>
+                                <li class="relay-step" data-step="retire" data-state="pending" aria-current="false"><span class="relay-step-dot">4</span><div class="relay-step-text"><strong>Retire</strong><small id="relayStepRetire">old pid stops</small></div></li>
+                            </ol>
+                            <div class="relay-side">
+                                <div class="relay-inflight">
+                                    <span class="relay-label">In flight now</span>
+                                    <strong class="relay-inflight-value" id="relayInflight">—</strong>
+                                    <span class="relay-inflight-note" id="relayInflightNote">live requests_processing</span>
+                                </div>
+                                <dl class="relay-facts">
+                                    <div><dt>Active</dt><dd id="relayActive">—</dd></div>
+                                    <div><dt>Draining</dt><dd id="relayDraining">none</dd></div>
+                                    <div><dt>Last swap</dt><dd id="relayLastSwap">never</dd></div>
+                                </dl>
+                            </div>
+                        </div>
+                        <div class="relay-endpoint">
+                            <div class="relay-endpoint-copy">
+                                <span class="relay-label">Stable OpenAI base URL</span>
+                                <code id="relayEndpoint">—</code>
+                                <span class="relay-endpoint-hint">Point clients here; direct ports 9931/9932 rotate on every swap.</span>
+                            </div>
+                            <div class="pill-row">
+                                <button class="btn small" data-copy="relayEndpoint" data-copy-label="OpenAI base URL">Copy base URL</button>
+                                <button class="btn small" data-copy="relayUds" data-copy-label="Unix socket">Copy UDS</button>
+                            </div>
+                        </div>
+                        <code id="relayUds" class="relay-uds" hidden>—</code>
                     </div>
                     <div class="grid stats">
                         <div class="panel stat">

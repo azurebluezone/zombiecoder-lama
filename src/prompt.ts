@@ -48,6 +48,16 @@ export interface PromptState {
 
 export function syncSystemPrompt(store: Store, cfg: Config): PromptState {
   const file = readPromptFile(cfg);
+  // One prompt, every model. Older installs seeded a second default row (id "default");
+  // drop it whenever the authoritative file is present so `defaultPrompt()` cannot pick
+  // a different text than the one the admin shows.
+  if (file) {
+    const stale = store.listPrompts().filter((row) => row.is_default === 1 && row.id !== PROMPT_ID);
+    for (const row of stale) store.deletePrompt(row.id);
+    if (stale.length) {
+      store.audit("prompt.prune", stale.map((row) => row.id).join(","), `kept only ${PROMPT_ID}`, "boot");
+    }
+  }
   if (!file) {
     const existing = store.getPrompt(PROMPT_ID);
     return {

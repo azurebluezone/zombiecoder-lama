@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AuditRow,
   DocumentRow,
+  DownloadRow,
   EngineState,
   McpRow,
   McpToolRow,
@@ -22,6 +23,44 @@ import type { OsInfo } from "./types.ts";
 import { MCP_TOOLS, TOOL_USE_CASES } from "./mcp/tools.ts";
 
 const now = (): string => new Date().toISOString();
+
+/**
+ * Boot storm: lama-admin, lama-engine and any CLI run all open the same SQLite
+ * file within milliseconds of each other. When one process is mid-write, the
+ * other gets SQLITE_BUSY ("database is locked") once busy_timeout expires; after
+ * an unclean reset the WAL also has to be recovered first, which is why the
+ * error showed up on every reset but not on a normal service restart.
+ *
+ * The boot path (schema, seed rows, prompt sync, MCP config) is idempotent, so
+ * the correct answer to a transient lock is a bounded retry, not a dead unit.
+ */
+export function isDatabaseLocked(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /database (is|table is) locked/i.test(message) || /SQLITE_(BUSY|LOCKED)/.test(message);
+}
+
+export function retryDatabaseLocked<T>(
+  fn: () => T,
+  options: { attempts?: number; delayMs?: number; onRetry?: (attempt: number, delay: number, error: Error) => void } = {},
+): T {
+  const attempts = options.attempts ?? 8;
+  const delayMs = options.delayMs ?? 500;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      if (!isDatabaseLocked(error)) throw error;
+      lastError = error;
+      if (attempt === attempts) break;
+      const delay = delayMs * attempt;
+      options.onRetry?.(attempt, delay, error as Error);
+      // The boot path is synchronous, so block this thread instead of juggling timers.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    }
+  }
+  throw lastError;
+}
 
 const MIGRATIONS: Array<{ version: number; sql: string }> = [
   {
@@ -234,6 +273,27 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       ALTER TABLE mcp_servers ADD COLUMN last_probe_detail TEXT NOT NULL DEFAULT '';
       ALTER TABLE mcp_servers ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE mcp_servers ADD COLUMN tools_count INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    version: 4,
+    sql: `
+      -- Hugging Face downloads: the CLI and the admin API share one progress table
+      -- so the admin UI shows the real bytes of a real transfer, not page state.
+      CREATE TABLE IF NOT EXISTS model_downloads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        file TEXT NOT NULL,
+        path TEXT NOT NULL,
+        bytes_total INTEGER NOT NULL DEFAULT 0,
+        bytes_done INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','done','failed')),
+        error TEXT NOT NULL DEFAULT '',
+        started_at TEXT,
+        finished_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_model_downloads_status ON model_downloads(status, updated_at DESC);
     `,
   },
 ];
@@ -480,6 +540,54 @@ export class Store {
               COALESCE(ROUND(AVG(duration_ms)), 0) AS avg_ms
          FROM tool_usage GROUP BY tool ORDER BY calls DESC`,
     );
+  }
+
+  startDownload(repo: string, file: string, dest: string): DownloadRow {
+    const at = now();
+    const result = this.db
+      .prepare("INSERT INTO model_downloads(repo, file, path, status, started_at, updated_at) VALUES (?, ?, ?, 'running', ?, ?)")
+      .run(repo, file, dest, at, at);
+    return this.downloadRow(Number(result.lastInsertRowid))!;
+  }
+
+  updateDownload(id: number, bytesDone: number, bytesTotal: number): void {
+    this.run(
+      "UPDATE model_downloads SET bytes_done = ?, bytes_total = ?, updated_at = ? WHERE id = ?",
+      bytesDone,
+      bytesTotal,
+      now(),
+      id,
+    );
+  }
+
+  finishDownload(id: number, dest: string, bytes: number): void {
+    this.run(
+      "UPDATE model_downloads SET status = 'done', path = ?, bytes_done = ?, bytes_total = ?, finished_at = ?, updated_at = ?, error = '' WHERE id = ?",
+      dest,
+      bytes,
+      bytes,
+      now(),
+      now(),
+      id,
+    );
+  }
+
+  failDownload(id: number, error: string): void {
+    this.run(
+      "UPDATE model_downloads SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+      error.slice(0, 500),
+      now(),
+      now(),
+      id,
+    );
+  }
+
+  downloadRow(id: number): DownloadRow | undefined {
+    return this.one<DownloadRow>("SELECT * FROM model_downloads WHERE id = ?", id);
+  }
+
+  listDownloads(limit = 50): DownloadRow[] {
+    return this.all<DownloadRow>("SELECT * FROM model_downloads ORDER BY id DESC LIMIT ?", limit);
   }
 
   listMcpTools(mcpId?: string): McpToolRow[] {
@@ -790,6 +898,10 @@ export class Store {
     );
   }
 
+  deletePrompt(id: string): void {
+    this.run("DELETE FROM system_prompts WHERE id = ?", id);
+  }
+
   listSessions(): SessionRow[] {
     return this.all("SELECT * FROM sessions ORDER BY updated_at DESC");
   }
@@ -998,11 +1110,13 @@ export function seedStore(store: Store, cfg: Config, os: OsInfo): void {
   }
 
   if (!store.defaultPrompt()) {
+    // Bootstrap only: prompts/lama-system.md wins on the next syncSystemPrompt().
+    // There is exactly one system prompt (id "system") for every model.
     store.upsertPrompt({
-      id: "default",
-      name: "default",
+      id: "system",
+      name: "system",
       content:
-        "You are a concise assistant running on a local llama.cpp engine. Answer in the user's language. Use a tool only when it is necessary; never invent tool results.",
+        "You are the assistant served by lama, a local llama.cpp engine owned by Sahon Srabon (Developer Zone). Identity is fixed. Answer in the user's language, never invent tool output, and say when you do not know.",
       version: 1,
       is_default: 1,
       metadata_json: "{}",
@@ -1046,14 +1160,21 @@ export function seedStore(store: Store, cfg: Config, os: OsInfo): void {
     for (const entry of fs.readdirSync(cfg.modelsDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".gguf")) continue;
       const modelId = slug(entry.name);
+      const filePath = path.join(cfg.modelsDir, entry.name);
       const existing = store.getModel(modelId);
       if (existing) continue;
+      // models carries UNIQUE(provider_id, model_id): a file registered under a
+      // custom row id must not be seeded a second time or every boot crashes.
+      const claimed = store
+        .listModels()
+        .find((row) => row.path === filePath || (row.provider_id === "llamacpp" && row.model_id === modelId));
+      if (claimed) continue;
       store.upsertModel({
         id: modelId,
         provider_id: "llamacpp",
         name: entry.name.replace(/\.gguf$/i, ""),
         model_id: modelId,
-        path: path.join(cfg.modelsDir, entry.name),
+        path: filePath,
         context: 4096,
         max_tokens: 1024,
         temperature: 0.7,

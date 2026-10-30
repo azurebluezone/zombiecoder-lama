@@ -26,22 +26,22 @@ test("seed files populate metadata, identity and resolved paths idempotently", (
   const first = applySeeds(store, cfg, testOs(), { dir: path.resolve("db/seed") });
   assert.equal(first.counts.models, 2);
   assert.equal(first.counts.documents, 5);
-  assert.equal(first.counts.prompts, 1);
+  // The seed file no longer ships a second default prompt: prompts/lama-system.md is the one.
+  assert.equal(first.counts.prompts, 0);
   assert.equal(store.identity()?.name, "lama");
   assert.equal(store.getProvider("llamacpp")?.base_url, "http://127.0.0.1:19933");
   assert.match(store.getModel("qwen2-5-0-5b-instruct-q4-k-m")?.metadata_json ?? "", /tool_reliability/);
   assert.equal(store.getModel("qwen2-5-0-5b-instruct-q4-k-m")?.path, path.join(cfg.modelsDir, "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"));
   assert.match(store.getDocumentBySlug("openai-http")?.body ?? "", /127\.0\.0\.1:19933/);
   assert.match(store.getDocumentBySlug("openai-uds")?.body ?? "", new RegExp(cfg.udsPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  const prompt = store.getPrompt("default");
-  // seedStore writes a bootstrap prompt first, so the seed content is a real version bump.
-  assert.equal(prompt?.version, 2);
-  assert.match(prompt?.content ?? "", /ONLY one JSON object/);
-  assert.match(prompt?.content ?? "", /Sahon Srabon/);
+  // seedStore leaves exactly one bootstrap row and the seed step must not add another.
+  assert.equal(store.listPrompts().length, 1);
+  assert.equal(store.getPrompt("system")?.id, "system");
+  assert.equal(store.getPrompt("default"), undefined);
   const second = applySeeds(store, cfg, testOs(), { dir: path.resolve("db/seed") });
   assert.equal(second.counts.prompts, 0);
-  assert.equal(second.skipped.prompts, 1);
-  assert.equal(store.getPrompt("default")?.version, 2);
+  assert.equal(second.skipped.prompts, 0);
+  assert.equal(store.listPrompts().length, 1);
 });
 
 test("identity validation rejects incomplete manifests", () => {

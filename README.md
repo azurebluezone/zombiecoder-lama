@@ -138,6 +138,30 @@ model load and the admin URL in the browser. Every step prints `[ok]` or `[fail]
 output; a step the platform cannot do is skipped (never hung), and the script exits non-zero if
 anything failed. Live on this machine: `9/9 steps ok`, exit `0`.
 
+### From the internet, one command
+
+Fresh machine, nothing cloned yet:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash
+```
+
+`scripts/bootstrap.sh` installs the official Node 24 build only when `node -v` is older (checksum
+verified, no sudo), downloads this repository's tarball into `~/lama`, and runs the one-shot
+installer above. A re-run is an update: `.env`, `data/`, `models/` and `logs/` are preserved.
+
+```bash
+# headless server
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash -s -- --no-browser
+
+# different directory / branch
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | LAMA_DIR="$HOME/llm" LAMA_REF=main bash
+
+# download only, do not install
+curl -fsSL https://raw.githubusercontent.com/azurebluezone/zombiecoder-lama/main/scripts/bootstrap.sh | bash -s -- --fetch-only
+```
+
+
 ## Distributable build
 
 ```bash
@@ -187,11 +211,13 @@ no demo rows.
 - **Every call is counted.** The admin proxy and `/api/chat` write a `request_logs` row (model,
   protocol, transport, stream, status, duration, first token, tokens, prompt id), so Model List and
   Logs show real totals instead of estimates. Per-tool calls land in `tool_usage`.
-- **The prompt is managed, the engine stores none.** `prompts/lama-system.md` is authored in the
-  repo, synced into `system_prompts` on boot, and editable in Prompts. An admin edit bumps the
+- **One prompt, every model.** `prompts/lama-system.md` is the single authoritative system prompt:
+  fixed identity (lama, owner, callsign) plus the answer/tool rules. It is authored in the repo,
+  synced into the one `system_prompts` row on boot, and editable in Prompts. An admin edit bumps the
   version and sets `edited`, so a restart never overwrites it; *Reset to file* restores the repo
-  copy. `GET /api/system-prompt.txt` hands the text to callers, who must send it as the first
-  `system` message (OpenAI) or the top-level `system` field (Anthropic).
+  copy. A second legacy default row seeded by older installs is pruned on boot. The engine stores
+  no prompt, so `GET /api/system-prompt.txt` hands the text to callers, who must send it as the
+  first `system` message (OpenAI) or the top-level `system` field (Anthropic).
 - **Docs are generated from the registry.** `GET /api/transports/:id/docs(.txt)` builds
   provider-style guides (connection, models/aliases, OpenAI, Anthropic, prompt, parser, errors,
   SSE) from the live endpoint and alias, so every curl block is copy-pasteable.
@@ -306,9 +332,10 @@ different owner.
 ## Seeds
 
 `db/seed/lama.json` (`schema: lama.seed/v1`) declares providers, transports, MCP servers, transport
-documents, the default prompt and models. `applySeeds()` validates every field, resolves
+documents and models — not prompts: `prompts/lama-system.md` owns the single system prompt.
+`applySeeds()` validates every field, resolves
 `127.0.0.1:9933` / `127.0.0.1:9931` / the socket path to the live config, and is idempotent —
-an unchanged prompt is skipped instead of version-bumped. Boot applies seeds; `node src/main.ts seed`
+an unchanged row is skipped instead of version-bumped. Boot applies seeds; `node src/main.ts seed`
 does it on demand.
 
 ## Security model
@@ -327,7 +354,11 @@ does it on demand.
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node --test test/*.test.ts  → 58 tests
+npm test            # node --test test/*.test.ts  → 64 tests
+node scripts/model-matrix.mjs            # load/unload every model × http, uds, https
+node scripts/model-matrix.mjs --verify   # re-check one prompt + both ports + the evidence file
+node scripts/transport-probe.mjs         # every endpoint over http and uds, side by side
+node scripts/transport-probe.mjs --verify
 ```
 
 Covered: portable config derivation, parser stages, release asset mapping, SQLite seed/migrations/legacy guard (incl.

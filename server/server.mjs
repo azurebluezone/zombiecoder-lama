@@ -61,6 +61,7 @@ const cfg = {
   LAMA_SSL_CERT: env("LAMA_SSL_CERT") || "",
   LAMA_MGMT_HOST: env("LAMA_MGMT_HOST") || "127.0.0.1",
   LAMA_MGMT_PORT: Number(env("LAMA_MGMT_PORT") || 9933),
+  LAMA_ADMIN_PORT: Number(env("LAMA_ADMIN_PORT") || 9933),
   LAMA_MODELS_DIR: env("LAMA_MODELS_DIR") || path.join(LAMA, "models"),
   LAMA_LOG_DIR: env("LAMA_LOG_DIR") || path.join(LAMA, "logs"),
   LAMA_API_KEY: env("LAMA_API_KEY") || "",
@@ -75,6 +76,17 @@ const cfg = {
 const LLAMA_TLS = Boolean(cfg.LAMA_SSL_KEY && cfg.LAMA_SSL_CERT); // engine-native TLS
 const LLAMA_BASE = `http://${cfg.LAMA_LLAMA_HOST}:${cfg.LAMA_LLAMA_PORT}`;          // plaintext origin (http test)
 const LLAMA_ORIGIN = `${LLAMA_TLS ? "https" : "http"}://${cfg.LAMA_LLAMA_HOST}:${cfg.LAMA_LLAMA_PORT}`; // what the engine serves
+
+// The current admin (src/main.ts serve) owns 9933 by default. Sharing that port used
+// to crash-loop lama-admin.service with an EADDRINUSE stack trace, so refuse up front
+// and name both knobs instead of losing the race at listen().
+if (cfg.LAMA_MGMT_PORT === cfg.LAMA_ADMIN_PORT) {
+  process.stderr.write(
+    `legacy lama manager refuses ${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT}: the current lama admin owns that port. ` +
+      `Set LAMA_MGMT_PORT (for example 9934) or move LAMA_ADMIN_PORT.\n`,
+  );
+  process.exit(1);
+}
 
 // ---- SQLite (source of truth for MCP servers, prompts, chat runs) ----------------
 const DATA_DIR = cfg.LAMA_DATA_DIR;
