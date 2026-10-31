@@ -1,0 +1,46 @@
+--- /tmp/opencode/plugin.ts.bak	2026-10-31 02:34:45.764511586 +0000
++++ /home/xubuntu/.opencode/plugins/zombiecoder/plugin.ts	2026-10-31 02:34:45.783511771 +0000
+@@ -119,6 +119,10 @@
+   // so the model selected in /models governs the session and subagents inherit
+   // it. true restores the fixed agent -> model mapping for a multi-model gateway.
+   agentModelPins: boolean;
++  // Providers whose models are too small for the full context pack + persona.
++  // Injecting ~4k tokens of doctrine into a 1B local model turns a 10-second
++  // answer into a 10-minute one, so those providers get the user's request only.
++  leanProviders: string[];
+ };
+ 
+ export const DEFAULT_CONFIG: ZombieConfig = {
+@@ -136,6 +140,7 @@
+   skillRepo: DEFAULT_SKILL_REPO,
+   agentModes: {},
+   agentModelPins: false,
++  leanProviders: ["lama"],
+ };
+ 
+ // Where the plugin itself lives decides where OpenCode-owned files belong.
+@@ -1136,7 +1141,11 @@
+         // shared rules in their markdown; builtin runners (build/plan/general/
+         // explore) do not, so they get the identity header + full persona here.
+         const persona = mergeAgentPersona(agentID);
+-        if (Array.isArray(event?.system) && typeof event.system.push === "function") {
++        // Small local models cannot afford the pack + persona: keep the request
++        // lean so the editor stays usable. Configurable via leanProviders.
++        const providerID = String(event?.model?.providerID ?? "");
++        const lean = config.leanProviders.includes(providerID);
++        if (!lean && Array.isArray(event?.system) && typeof event.system.push === "function") {
+           event.system.push({
+             type: "text",
+             text: [
+@@ -1170,8 +1179,9 @@
+           syllabusExcerptBytes: pack.syllabusExcerptBytes,
+           memoryArchives: pack.memory.archives,
+           uiLine: pack.uiLine,
+-          persona: persona.kind,
+-          personaBytes: persona.bytes,
++          persona: lean ? "skipped-lean" : persona.kind,
++          personaBytes: lean ? 0 : persona.bytes,
++          lean,
+         });
+       }),
+     );

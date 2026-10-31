@@ -12,7 +12,8 @@ import { writeEngineMcpConfig } from "./mcp/config.ts";
 import { applySeeds } from "./seed.ts";
 import { ensureIdentityFile } from "./identity.ts";
 import { syncSystemPrompt } from "./prompt.ts";
-import { installService, serviceAction, serviceAvailable } from "./service.ts";
+import { disableService, installService, serviceAction, serviceAvailable } from "./service.ts";
+import type { UnitKind } from "./service.ts";
 import { clearToken, downloadFile, fetchRange, getToken, listGgufFiles, maskToken, resolveUrl, setToken } from "./hf.ts";
 
 function usage(): void {
@@ -29,9 +30,12 @@ Usage:
   node src/main.ts engine unload
   node src/main.ts engine reload [model-id|alias] [--ttl HOURS]
   node src/main.ts engine status
-  node src/main.ts service install user|system [--admin] [--start|--no-start]
-  node src/main.ts service start|stop|restart|status user|system [--admin]
+  node src/main.ts service install user|system [--kind engine|manager|status|admin] [--start|--no-start]
+  node src/main.ts service start|stop|restart|status user|system [--kind ...]
+  node src/main.ts service disable user|system [--kind ...] [--stop]
   node src/main.ts seed
+  node src/main.ts model add <file.gguf> [--id NAME] [--ctx N]
+  node src/main.ts model list|remove <id>
   node src/main.ts mcp
   node src/main.ts hf token set [hf_...]   (reads stdin when no argument)
   node src/main.ts hf token status|clear
@@ -308,14 +312,24 @@ async function main(): Promise<void> {
   if (command === "service") {
     const action = rest[0];
     const mode = rest.includes("system") ? "system" : "user";
-    const kind = rest.includes("--admin") ? "admin" : "engine";
+    const kindIndex = rest.indexOf("--kind");
+    const requested = kindIndex >= 0 ? rest[kindIndex + 1] : undefined;
+    const KINDS = new Set(["engine", "manager", "status", "admin"]);
+    const kind = (requested && KINDS.has(requested) ? requested : rest.includes("--admin") ? "admin" : "engine") as UnitKind;
     if (action === "install") {
-      // engine: enable-only by default (the manager loads models on demand);
-      // admin: start now, since it is the human entry point.
+      // engine/manager/status are resident; the admin unit is never started by an
+      // install, because the admin must stay an on-demand client.
       const start = rest.includes("--no-start") ? false : rest.includes("--start") ? true : undefined;
       const result = installService(cfg, os, mode, kind, start === undefined ? {} : { start });
       store.audit("service.install", `${kind}/${mode}`, result.detail, "cli");
       process.stdout.write(`${JSON.stringify({ kind, mode, ...result }, null, 2)}\n`);
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
+    if (action === "disable") {
+      const result = disableService(os, mode, kind, { stop: rest.includes("--stop") });
+      store.audit("service.disable", `${kind}/${mode}`, result.detail, "cli");
+      process.stdout.write(`${JSON.stringify({ kind, mode, action, ...result }, null, 2)}\n`);
       if (!result.ok) process.exitCode = 1;
       return;
     }
@@ -326,7 +340,64 @@ async function main(): Promise<void> {
       if (!result.ok) process.exitCode = 1;
       return;
     }
-    throw new Error("service action must be install, start, stop, restart or status");
+    throw new Error("service action must be install, disable, start, stop, restart or status");
+  }
+
+  if (command === "model") {
+    const action = rest[0] ?? "list";
+    if (action === "list") {
+      const rows = store.listModels().map((row) => ({
+        id: row.id,
+        alias: row.model_id,
+        path: row.path,
+        context: row.context,
+        enabled: row.enabled,
+      }));
+      process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+      return;
+    }
+    if (action === "add") {
+      const file = rest[1];
+      if (!file) throw new Error("model add needs a .gguf path");
+      const abs = path.resolve(cfg.root, file);
+      if (!fs.existsSync(abs)) throw new Error(`no such file: ${abs}`);
+      if (!abs.toLowerCase().endsWith(".gguf")) throw new Error("only .gguf files can be registered");
+      const idIndex = rest.indexOf("--id");
+      const ctxIndex = rest.indexOf("--ctx");
+      const alias = slug(idIndex >= 0 ? (rest[idIndex + 1] ?? "") : path.basename(abs).replace(/\.gguf$/i, ""));
+      if (!alias) throw new Error("model add needs a non-empty --id");
+      const context = ctxIndex >= 0 ? Number(rest[ctxIndex + 1]) : 4096;
+      if (!Number.isInteger(context) || context < 256) throw new Error("--ctx must be an integer >= 256");
+      const existing = store.getModel(alias);
+      store.upsertModel({
+        id: alias,
+        provider_id: "llamacpp",
+        name: existing?.name ?? path.basename(abs).replace(/\.gguf$/i, ""),
+        model_id: alias,
+        path: abs,
+        context,
+        max_tokens: existing?.max_tokens ?? 1024,
+        temperature: existing?.temperature ?? 0.7,
+        quant: existing?.quant ?? null,
+        load_mode: existing?.load_mode ?? "auto",
+        ttl_hours: existing?.ttl_hours ?? cfg.defaultTtlHours,
+        enabled: 1,
+        metadata_json: existing?.metadata_json ?? "{}",
+      });
+      store.audit("model.add", alias, abs, "cli");
+      process.stdout.write(`${JSON.stringify(store.getModel(alias), null, 2)}\n`);
+      return;
+    }
+    if (action === "remove") {
+      const id = rest[1];
+      if (!id) throw new Error("model remove needs an id");
+      if (store.engineState().model_id === id) throw new Error("unload the engine before removing the active model");
+      store.deleteModel(id);
+      store.audit("model.remove", id, "", "cli");
+      process.stdout.write(`${JSON.stringify({ removed: id }, null, 2)}\n`);
+      return;
+    }
+    throw new Error("model action must be add, list or remove");
   }
 
   if (command === "mcp") {
@@ -444,3 +515,7 @@ main().catch((error: unknown) => {
   process.stderr.write(`lama: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });
+
+function slug(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "item";
+}

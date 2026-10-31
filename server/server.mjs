@@ -60,7 +60,7 @@ const cfg = {
   LAMA_SSL_KEY: env("LAMA_SSL_KEY") || "",
   LAMA_SSL_CERT: env("LAMA_SSL_CERT") || "",
   LAMA_MGMT_HOST: env("LAMA_MGMT_HOST") || "127.0.0.1",
-  LAMA_MGMT_PORT: Number(env("LAMA_MGMT_PORT") || 9933),
+  LAMA_MGMT_PORT: Number(env("LAMA_MGMT_PORT") || 9934),
   LAMA_ADMIN_PORT: Number(env("LAMA_ADMIN_PORT") || 9933),
   LAMA_MODELS_DIR: env("LAMA_MODELS_DIR") || path.join(LAMA, "models"),
   LAMA_LOG_DIR: env("LAMA_LOG_DIR") || path.join(LAMA, "logs"),
@@ -72,21 +72,18 @@ const cfg = {
   LAMA_DB: env("LAMA_DB") || path.join(LAMA, "data", "lama.db"),
   LAMA_ENV_FILE: ENV_FILE,
   LAMA_DATA_DIR: env("LAMA_DATA_DIR") || path.join(LAMA, "data"),
+  // Comma-separated model ids that must never receive a tool schema.
+  LAMA_STRIP_TOOLS: env("LAMA_STRIP_TOOLS") || "",
 };
 const LLAMA_TLS = Boolean(cfg.LAMA_SSL_KEY && cfg.LAMA_SSL_CERT); // engine-native TLS
 const LLAMA_BASE = `http://${cfg.LAMA_LLAMA_HOST}:${cfg.LAMA_LLAMA_PORT}`;          // plaintext origin (http test)
 const LLAMA_ORIGIN = `${LLAMA_TLS ? "https" : "http"}://${cfg.LAMA_LLAMA_HOST}:${cfg.LAMA_LLAMA_PORT}`; // what the engine serves
 
-// The current admin (src/main.ts serve) owns 9933 by default. Sharing that port used
-// to crash-loop lama-admin.service with an EADDRINUSE stack trace, so refuse up front
-// and name both knobs instead of losing the race at listen().
-if (cfg.LAMA_MGMT_PORT === cfg.LAMA_ADMIN_PORT) {
-  process.stderr.write(
-    `legacy lama manager refuses ${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT}: the current lama admin owns that port. ` +
-      `Set LAMA_MGMT_PORT (for example 9934) or move LAMA_ADMIN_PORT.\n`,
-  );
-  process.exit(1);
-}
+// The manager is standalone: it owns the engine and proxies /v1 without the
+// admin app. It used to refuse to start whenever LAMA_MGMT_PORT equalled
+// LAMA_ADMIN_PORT (both defaulted to 9933), which made "server only" impossible.
+// The port is now 9934, and a real bind failure is reported by the error handler
+// below instead of a config comparison.
 
 // ---- SQLite (source of truth for MCP servers, prompts, chat runs) ----------------
 const DATA_DIR = cfg.LAMA_DATA_DIR;
@@ -903,15 +900,34 @@ async function chatTest(input = {}) {
 const PROXIED = [/^\/v1\//, /^\/props/, /^\/tokenize/, /^\/detokenize/, /^\/slots/, /^\/metrics/, /^\/health/];
 const REQ_BUF_MAX = 2 * 1024 * 1024;
 
+// Models that cannot use tools. A 1B model given a tool schema answers with a
+// hallucinated call (e.g. skill {"id":"hi"}) and an empty message, so the tool
+// block is removed before the request reaches llama.cpp. Comma-separated ids.
+const STRIP_TOOLS = new Set(
+  String(cfg.LAMA_STRIP_TOOLS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
 function proxy(req, res) {
   const t0 = Date.now();
   const chunks = [];
   let size = 0;
   req.on("data", (c) => { size += c.length; if (size <= REQ_BUF_MAX) chunks.push(c); });
   req.on("end", () => {
-    const body = Buffer.concat(chunks);
+    let body = Buffer.concat(chunks);
     let modelTag = "unmapped";
-    try { const j = JSON.parse(body.toString("utf8") || "{}"); modelTag = j.model || modelTag; } catch {}
+    try {
+      const j = JSON.parse(body.toString("utf8") || "{}");
+      modelTag = j.model || modelTag;
+      if (STRIP_TOOLS.has(String(j.model)) && (j.tools || j.tool_choice)) {
+        delete j.tools;
+        delete j.tool_choice;
+        body = Buffer.from(JSON.stringify(j));
+        log({ kind: "proxy", action: "tools_stripped", model: String(j.model), path: req.url.split("?")[0] });
+      }
+    } catch {}
     const headers = { ...req.headers };
     delete headers.host;
     if (body.length) headers["content-length"] = Buffer.byteLength(body);
@@ -935,7 +951,21 @@ function proxy(req, res) {
     } else {
       upstream = http.request(`${LLAMA_BASE}${req.url}`, { method: req.method, headers }, sendUp);
     }
+    // When the client goes away (editor retry, timeout, Ctrl-C), the upstream
+    // request must die with it. Without this the engine keeps generating for a
+    // disconnected caller and the single slot stays busy for minutes, which
+    // makes every later request queue and time out too.
+    let clientGone = false;
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        clientGone = true;
+        upstream.destroy();
+        log({ kind: "proxy", action: "client_abort", path: req.url.split("?")[0], ms: Date.now() - t0 });
+      }
+    });
+
     upstream.on("error", (e) => {
+      if (clientGone) return;
       if (!res.headersSent) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: 503, message: `llama server not reachable: ${e.message}`, type: "unavailable_error" } }));
@@ -1176,13 +1206,32 @@ const server = http.createServer(async (req, res) => {
     }
     return send(200, { lines });
   }
-  if (p === "/admin" || p === "/") {
-    // The legacy HTML admin was removed; the current UI ships with the TypeScript manager.
-    return send(410, { error: { code: 410, message: "legacy admin removed; use the current lama admin (npm start)", type: "gone_error" } });
+  if (p === "/") {
+    return send(200, {
+      name: "lama-manager",
+      ok: true,
+      health: "/healthz",
+      status: "/api/status",
+      note: "standalone manager — the admin app is optional and is not required to run the engine",
+    });
+  }
+  if (p === "/admin") {
+    return send(404, { error: { code: 404, message: "no admin UI here; the admin app is optional (npm start)", type: "not_found_error" } });
   }
   if (p === "/favicon.ico") { res.writeHead(204); return res.end(); }
   if (PROXIED.some((re) => re.test(p))) return proxy(req, res);
-  send(404, { error: { code: 404, message: "no such route — legacy manager, admin moved to npm start", type: "invalid_request_error" } });
+  send(404, { error: { code: 404, message: "no such route — manager only; see /api/status", type: "invalid_request_error" } });
+});
+
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    process.stderr.write(
+      `lama manager cannot bind ${cfg.LAMA_MGMT_HOST}:${cfg.LAMA_MGMT_PORT} — port in use. ` +
+        `Set LAMA_MGMT_PORT to a free port; the admin app is optional and does not need this one.\n`,
+    );
+    process.exit(1);
+  }
+  throw error;
 });
 
 server.listen(cfg.LAMA_MGMT_PORT, cfg.LAMA_MGMT_HOST, () => {

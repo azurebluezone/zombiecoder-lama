@@ -96,10 +96,16 @@ test("install walkthrough is ordered, copy-pasteable and never prints the token"
   assert.ok(clone?.code?.includes("zombiecoder-lama"));
   const setup = docs.install.steps.find((step) => step.code?.includes("npm run setup"));
   assert.ok(setup?.code?.includes("grep '^LAMA_ADMIN_TOKEN=' .env"));
-  // one unit per install run: the engine unit must be installed too, or
-  // `systemctl --user restart lama-admin lama-engine` fails with "Unit not found".
-  assert.ok(setup?.code?.includes("service install user\n"), "engine unit install line");
-  assert.ok(setup?.code?.includes("service install user --admin"), "admin unit install line");
+  // The install guide must create the three resident units and leave the admin
+  // disabled: the admin is an on-demand client, never the engine's supervisor.
+  for (const kind of ["engine", "manager", "status"]) {
+    assert.ok(
+      setup?.code?.includes(`service install user --kind ${kind} --start`),
+      `${kind} unit install line`,
+    );
+  }
+  assert.ok(setup?.code?.includes("systemctl --user is-enabled lama-admin"), "admin-disabled check line");
+  assert.ok(!setup?.code?.includes("service install user --admin"), "install guide must not enable the admin unit");
   assert.ok(docs.install.intro.includes("copy"));
   assert.ok(docs.install.finish.includes("loginctl"));
 

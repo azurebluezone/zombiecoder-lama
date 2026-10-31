@@ -9,6 +9,8 @@
   },
   "scripts": {
     "start": "node src/main.ts serve",
+    "serve:manager": "node server/server.mjs",
+    "serve:status": "node server/status.mjs",
     "setup": "node src/main.ts setup",
     "doctor": "node src/main.ts doctor",
     "install:llama": "node src/main.ts install",

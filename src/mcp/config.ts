@@ -8,7 +8,34 @@ export function engineMcpConfigPath(cfg: Config): string {
   return path.join(cfg.dataDir, "mcp-servers.generated.json");
 }
 
-export function engineMcpConfig(store: Store): Record<string, unknown> {
+function outside(relative: string): boolean {
+  return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/**
+ * llama.cpp spawns a stdio MCP server with this cwd. The seed used to carry an
+ * absolute path from the developer's machine (/home/sahon/lama), so on every
+ * other host the spawn failed with ENOENT and every workspace tool looked broken.
+ * A cwd is now trusted only when it is a real directory inside this repo; a stale
+ * or escaping value falls back to the repo root instead of being handed to the engine.
+ */
+export function safeMcpCwd(raw: string, cfg: Config): string {
+  const value = String(raw ?? "").trim();
+  if (!value) return cfg.root;
+  if (value.includes("\0")) throw new Error("mcp cwd contains NUL");
+  const resolved = path.resolve(cfg.root, value);
+  if (outside(path.relative(cfg.root, resolved))) return cfg.root;
+  try {
+    const real = fs.realpathSync(resolved);
+    if (!fs.statSync(real).isDirectory()) return cfg.root;
+    if (outside(path.relative(fs.realpathSync(cfg.root), real))) return cfg.root;
+    return real;
+  } catch {
+    return cfg.root;
+  }
+}
+
+export function engineMcpConfig(store: Store, cfg: Config): Record<string, unknown> {
   const servers: Record<string, unknown> = {};
   for (const row of store.listMcp()) {
     if (!row.enabled || row.transport !== "stdio" || !row.command) continue;
@@ -16,7 +43,7 @@ export function engineMcpConfig(store: Store): Record<string, unknown> {
       command: row.command,
       args: JSON.parse(row.args_json || "[]") as string[],
       env: JSON.parse(row.env_json || "{}") as Record<string, string>,
-      ...(row.cwd ? { cwd: row.cwd } : {}),
+      cwd: safeMcpCwd(row.cwd ?? "", cfg),
       timeout_ms: row.timeout_ms,
     };
   }
@@ -24,7 +51,7 @@ export function engineMcpConfig(store: Store): Record<string, unknown> {
 }
 
 export function writeEngineMcpConfig(store: Store, cfg: Config): { path: string; count: number } {
-  const config = engineMcpConfig(store);
+  const config = engineMcpConfig(store, cfg);
   const servers = config.mcpServers as Record<string, unknown>;
   const target = engineMcpConfigPath(cfg);
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });

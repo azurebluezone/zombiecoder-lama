@@ -1,0 +1,14 @@
+[Unit]
+Description=lama status file (read-only polling, no admin)
+After=network-online.target
+
+[Service]
+WorkingDirectory={{LAMA_DIR}}
+EnvironmentFile={{LAMA_DIR}}/.env
+Environment=PATH={{HOME}}/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node {{LAMA_DIR}}/server/status.mjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

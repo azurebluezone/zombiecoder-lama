@@ -5,7 +5,12 @@ import { spawnSync } from "node:child_process";
 import type { Config } from "./config.ts";
 import type { OsInfo } from "./types.ts";
 
-export type UnitKind = "engine" | "admin";
+/**
+ * Four units, four jobs. The engine and the two serving processes are resident;
+ * the admin is deliberately not part of a normal install — it is a client you
+ * start when you want it, and it must never be the thing that owns the engine.
+ */
+export type UnitKind = "engine" | "manager" | "status" | "admin";
 
 export interface ServiceResult {
   ok: boolean;
@@ -15,7 +20,31 @@ export interface ServiceResult {
   commands?: string[];
 }
 
-const UNIT: Record<UnitKind, string> = { engine: "lama-engine", admin: "lama-admin" };
+const UNIT: Record<UnitKind, string> = {
+  engine: "lama-engine",
+  manager: "lama-mgmt",
+  status: "lama-status",
+  admin: "lama-admin",
+};
+
+interface KindSpec {
+  description: string;
+  script: string;
+  args: string[];
+}
+
+function spec(cfg: Config, kind: UnitKind): KindSpec {
+  switch (kind) {
+    case "engine":
+      return { description: "lama engine runner (stock llama.cpp)", script: path.join(cfg.root, "src", "main.ts"), args: ["engine-run"] };
+    case "manager":
+      return { description: "lama manager (/v1 proxy, no admin)", script: path.join(cfg.root, "server", "server.mjs"), args: [] };
+    case "status":
+      return { description: "lama status file (read-only polling)", script: path.join(cfg.root, "server", "status.mjs"), args: [] };
+    case "admin":
+      return { description: "lama admin API and UI (optional, on-demand only)", script: path.join(cfg.root, "src", "main.ts"), args: ["serve"] };
+  }
+}
 
 function run(command: string, args: string[]): { status: number; text: string } {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 20_000 });
@@ -38,8 +67,7 @@ export function unitPath(os: OsInfo, mode: "user" | "system", kind: UnitKind = "
 }
 
 function systemdUnit(cfg: Config, kind: UnitKind): string {
-  const command = kind === "engine" ? "engine-run" : "serve";
-  const description = kind === "engine" ? "lama engine runner (stock llama.cpp)" : "lama admin API and UI";
+  const { description, script, args } = spec(cfg, kind);
   return `[Unit]
 Description=${description}
 After=network.target
@@ -49,7 +77,7 @@ Type=simple
 WorkingDirectory=${cfg.root}
 Environment=LAMA_ENV_FILE=${cfg.envFile}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin
-ExecStart=${process.execPath} ${path.join(cfg.root, "src", "main.ts")} ${command}
+ExecStart=${[process.execPath, script, ...args].join(" ")}
 Restart=on-failure
 RestartSec=2
 KillMode=mixed
@@ -62,8 +90,9 @@ WantedBy=default.target
 }
 
 function launchdPlist(cfg: Config, kind: UnitKind): string {
-  const command = kind === "engine" ? "engine-run" : "serve";
+  const { script, args } = spec(cfg, kind);
   const name = UNIT[kind];
+  const programArguments = [process.execPath, script, ...args].map((value) => `    <string>${value}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -71,9 +100,7 @@ function launchdPlist(cfg: Config, kind: UnitKind): string {
   <key>Label</key><string>com.lama.${name}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${process.execPath}</string>
-    <string>${path.join(cfg.root, "src", "main.ts")}</string>
-    <string>${command}</string>
+${programArguments}
   </array>
   <key>WorkingDirectory</key><string>${cfg.root}</string>
   <key>EnvironmentVariables</key>
@@ -95,7 +122,9 @@ export function installService(
   options: { start?: boolean } = {},
 ): ServiceResult {
   const name = UNIT[kind];
-  const start = options.start ?? kind === "admin";
+  // Resident by default for the three serving units; the admin is never started
+  // by an install — the operator starts it when they actually want it.
+  const start = options.start ?? kind !== "admin";
   if (mode === "system" && !os.isRoot) {
     const target = unitPath(os, mode, kind);
     return {
@@ -133,14 +162,15 @@ export function installService(
   }
 
   const target = unitPath(os, mode, kind);
+  const { script, args } = spec(cfg, kind);
   return {
     ok: false,
     needsRoot: true,
     detail: "Windows service install needs an elevated shell; no elevation was attempted",
     path: target,
     commands: [
-      `sc.exe create ${name} binPath= "${process.execPath} ${path.join(cfg.root, "src", "main.ts")} ${kind === "engine" ? "engine-run" : "serve"}" start= auto`,
-      `sc.exe start ${name}`,
+      `sc.exe create ${name} binPath= "${[process.execPath, script, ...args].join(" ")}" start= ${start ? "auto" : "demand"}`,
+      `sc.exe ${start ? "start" : "description"} ${name}`,
     ],
   };
 }
@@ -194,6 +224,54 @@ export function servicePid(os: OsInfo, mode: "user" | "system", kind: UnitKind =
     return match ? Number(match[1]) : null;
   }
   return null;
+}
+
+/**
+ * True when the unit is installed *and* enabled at boot, whether or not it is
+ * running right now. The engine uses this to decide who owns the process: once a
+ * supervisor unit is enabled, no admin/CLI call may spawn its own engine.
+ */
+export function serviceEnabled(os: OsInfo, mode: "user" | "system", kind: UnitKind = "engine"): boolean {
+  const name = UNIT[kind];
+  if (os.platform === "linux") {
+    const scope = mode === "user" ? ["--user"] : [];
+    const result = run("systemctl", [...scope, "is-enabled", `${name}.service`]);
+    return result.status === 0 && /^enabled|^static|^indirect/im.test(result.text.trim());
+  }
+  if (os.platform === "darwin") {
+    return fs.existsSync(unitPath(os, mode, kind));
+  }
+  return run("sc.exe", ["query", name]).status === 0;
+}
+
+/** Disable (and optionally stop) a unit without failing when it was never installed. */
+export function disableService(
+  os: OsInfo,
+  mode: "user" | "system",
+  kind: UnitKind = "engine",
+  options: { stop?: boolean } = {},
+): ServiceResult {
+  const name = UNIT[kind];
+  if (os.platform === "linux") {
+    const scope = mode === "user" ? ["--user"] : [];
+    if (options.stop) run("systemctl", [...scope, "stop", `${name}.service`]);
+    const result = run("systemctl", [...scope, "disable", `${name}.service`]);
+    run("systemctl", [...scope, "reset-failed", `${name}.service`]);
+    return { ok: result.status === 0 || /No such file|not loaded/i.test(result.text), detail: result.text || "disabled" };
+  }
+  if (os.platform === "darwin") {
+    const target = unitPath(os, mode, kind);
+    const domain = mode === "user" ? `gui/${process.getuid?.() ?? 0}` : "system";
+    if (options.stop) run("launchctl", ["bootout", `${domain}/com.lama.${name}`]);
+    try {
+      fs.rmSync(target, { force: true });
+    } catch {
+      // already gone
+    }
+    return { ok: true, detail: `removed ${target}`, path: target };
+  }
+  const result = run("sc.exe", ["delete", name]);
+  return { ok: result.status === 0 || /1060/.test(result.text), detail: result.text || "deleted" };
 }
 
 export function serviceAvailable(os: OsInfo): boolean {

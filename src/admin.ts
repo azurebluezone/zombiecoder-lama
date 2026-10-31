@@ -1409,7 +1409,7 @@ export function createAdminServer(ctx: Context): http.Server {
       }
 
       if (method === "GET" && pathname === "/api/mcp/config") {
-        const config = engineMcpConfig(store);
+        const config = engineMcpConfig(store, cfg);
         const servers = config.mcpServers as Record<string, { command?: string; args?: string[] }>;
         json(res, 200, {
           path: path.join(cfg.dataDir, "mcp-servers.generated.json"),

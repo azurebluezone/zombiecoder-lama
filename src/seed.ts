@@ -4,6 +4,7 @@ import type { Config } from "./config.ts";
 import type { Store } from "./db.ts";
 import type { LoadMode, McpTransport, OsInfo } from "./types.ts";
 import { loadIdentity } from "./identity.ts";
+import { safeMcpCwd } from "./mcp/config.ts";
 
 type Item = Record<string, unknown>;
 type Section = "providers" | "transports" | "mcp_servers" | "documents" | "prompts" | "models";
@@ -150,7 +151,7 @@ function seedMcp(store: Store, cfg: Config, items: unknown[], where: string, rep
       command: transport === "stdio" ? (string(raw, "command", tag, 2000) === "node" ? process.execPath : string(raw, "command", tag, 2000)) : null,
       args_json: JSON.stringify(args.map((arg) => (arg.startsWith("src/") ? path.join(cfg.root, arg) : arg))),
       env_json: JSON.stringify(env),
-      cwd: optionalString(raw, "cwd", 4000) ?? cfg.root,
+      cwd: safeMcpCwd(optionalString(raw, "cwd", 4000) ?? "", cfg),
       url: transport === "stdio" ? null : optionalString(raw, "url"),
       api_key_ref: optionalString(raw, "api_key_ref", 120),
       timeout_ms: integer(raw, "timeout_ms", 30000, 1000, 600000, tag),

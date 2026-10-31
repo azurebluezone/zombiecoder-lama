@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { MCP_TOOLS, callTool } from "./tools.ts";
 
 const SERVER_INFO = { name: "lama-tools", version: "0.1.0" };
@@ -85,6 +88,22 @@ async function handle(request: JsonRpcRequest): Promise<void> {
 }
 
 function main(): void {
+  // Pin the workspace before any tool call. The old code took process.cwd(),
+  // which is whatever cwd the MCP row carries — a stale path from another
+  // machine, or "/" if someone set it. Both made every workspace tool useless.
+  const raw = process.env.LAMA_WORKSPACE || process.cwd();
+  const root = path.resolve(raw);
+  const unsafe = new Set(["/", "/etc", "/usr", "/var", "/proc", "/sys", "/dev", "/root", "/boot", "/home", os.homedir()]);
+  if (unsafe.has(root)) {
+    process.stderr.write(`lama-tools: refusing unsafe workspace root ${root}; set LAMA_WORKSPACE to a project directory\n`);
+    process.exit(2);
+  }
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+    process.stderr.write(`lama-tools: workspace root does not exist: ${root}\n`);
+    process.exit(2);
+  }
+  process.env.LAMA_WORKSPACE = root;
+
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   rl.on("line", (line) => {
     const trimmed = line.trim();
@@ -102,7 +121,7 @@ function main(): void {
     });
   });
   rl.on("close", () => process.exit(0));
-  process.stderr.write(`lama-tools MCP server ready (${MCP_TOOLS.length} tools)\n`);
+  process.stderr.write(`lama-tools MCP server ready (${MCP_TOOLS.length} tools, workspace ${root})\n`);
 }
 
 main();

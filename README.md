@@ -5,12 +5,27 @@ It owns the boring parts — install, systemd units, model registry, TTL, transp
 and never re-implements the engine.
 
 ```
-control plane   :9933  admin API + UI (writes, auth, identity headers, optional /v1 proxy)
+manager         :9934  standalone /v1 proxy + /healthz (no admin needed)
+status          :9935  read-only polling (JSON; HTML only with LAMA_STATUS_HTML=1)
 data plane      :9931  stock llama.cpp (OpenAI + Anthropic surfaces)
 unix socket     /tmp/llama-<uid>/llama.sock   dir 0700, socket 0660
+admin (optional) :9933  admin API + UI (writes, auth, identity headers, optional /v1 proxy)
 registry        data/manager.db              SQLite (WAL), migrations in lama_manager_migrations
 identity        identity.json                SSI-Core manifest, mode 0444
 seeds           db/seed/lama.json            declarative rows, applied on boot
+```
+
+The admin app is **optional and on-demand**. `lama-engine.service` supervises the
+engine, `server/server.mjs` (manager) and `server/status.mjs` (status) run on their
+own and never import the admin — see [docs/api-tcp-uds.md](docs/api-tcp-uds.md)
+for the client-facing API.
+
+```bash
+systemctl --user status lama-engine   # the engine's supervisor
+npm run serve:manager                 # 127.0.0.1:9934
+npm run serve:status                  # 127.0.0.1:9935
+npm start                             # admin, only while you want it
+./scripts/install-from-git.sh --dry-run   # fresh-OS bootstrap plan
 ```
 
 Node 24+ only (`node:sqlite`, `fetch`, native TypeScript execution). **Zero runtime dependencies.**
@@ -73,57 +88,182 @@ grep '^LAMA_ADMIN_TOKEN=' .env
 
 Copy the value after `=`. That token is the only password; the file is `0600` and contains no paths.
 
-### 6. Install the systemd user units and start the admin
+### 6. Install the three resident units
 
 ```bash
-node src/main.ts service install user            # lama-engine: enabled, idles
-node src/main.ts service install user --admin    # lama-admin: enabled and started
-systemctl --user status lama-admin --no-pager
+node src/main.ts service install user --kind engine --start
+node src/main.ts service install user --kind manager --start
+node src/main.ts service install user --kind status --start
+systemctl --user is-enabled lama-admin   # prints: disabled
 ```
 
-`service install` handles one unit per run, so both lines are needed. `lama-admin` starts now,
-`lama-engine` is enabled but idles until a model is selected (so it never crash-loops). To keep it
-running after you log out: `loginctl enable-linger "$USER"`.
+Three units run the system, each with one job:
 
-### 7. Open the admin UI
+| unit | port | job |
+|---|---|---|
+| `lama-engine` | 9931 + Unix socket | owns the stock llama.cpp process |
+| `lama-mgmt` | 9934 | `/v1` proxy + `/healthz`, checks `LAMA_API_KEY` |
+| `lama-status` | 9935 | read-only polling, JSON by default |
 
-Open <http://127.0.0.1:9933> in a browser and paste the token. On a headless server use a tunnel:
-`ssh -L 9933:127.0.0.1:9933 user@server`, then open the same localhost URL.
+The admin is **not** one of them. It is an on-demand client (`npm start`), it has no
+enabled unit, and it cannot spawn its own engine: once `lama-engine` is enabled, every
+`engine load` goes through `systemctl --user restart lama-engine`. To keep the three
+units running after logout: `loginctl enable-linger "$USER"`.
 
-### 8. Add one model
+### 7. Add one model — no admin needed
 
 ```bash
 mkdir -p models
 curl -L --fail -o "models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \
   "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+node src/main.ts model add models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --id qwen2.5-0.5b --ctx 4096
+node src/main.ts engine load qwen2.5-0.5b
 ```
 
-The seed already registered this row, so open **Model List**, find
-`Qwen2.5-0.5B-Instruct-Q4_K_M` and press **Load**. Prefer the terminal?
+`engine load` writes the selection and restarts the engine unit; the supervisor spawns
+the binary and writes `logs/engine-<id>.log`.
+
+### 8. Check it
 
 ```bash
-TOKEN=$(grep '^LAMA_ADMIN_TOKEN=' .env | cut -d= -f2)
-curl -sS -X POST http://127.0.0.1:9933/api/engine/load \
-  -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"model_id":"qwen2-5-0-5b-instruct-q4-k-m","ttl_hours":4}'
+curl -s http://127.0.0.1:9934/healthz        # {"ok":true}
+curl -s http://127.0.0.1:9935/status.json    # engine.up, model, disk
+curl -s http://127.0.0.1:9934/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"Say OK"}],"max_tokens":4}'
 ```
 
-### 9. Check it
+`npm run doctor` prints the OS, stock binary, engine state and database. The
+client-facing API (TCP, UDS, nginx proxy, Python client, response shapes) is in
+[docs/api-tcp-uds.md](docs/api-tcp-uds.md). `./scripts/verify-client-job.sh` runs
+one real task through every surface and prints a single PASS/FAIL line.
+
+### 9. The admin, when you actually want it
 
 ```bash
-npm run doctor
-curl -s http://127.0.0.1:9933/healthz
+npm start                                  # 127.0.0.1:9933, foreground
 ```
 
-`doctor` prints the OS, stock binary, engine state, database and admin URL.
+The admin stays loopback-only on purpose: it is not proxied, and there is no
+supported way to publish it.
+
+Paste the token from `.env`, do the thing, then stop it. It is never enabled at boot,
+and stopping it leaves the engine, the manager and the status file untouched.
 
 ### Stop, restart, update
 
 ```bash
-systemctl --user stop lama-admin lama-engine      # stop
-systemctl --user restart lama-admin               # restart after a config change
+systemctl --user stop lama-engine lama-mgmt lama-status
+systemctl --user restart lama-engine            # after `engine load` this is automatic
 cd "$HOME/lama" && git pull && npm install && npm run check \
-  && systemctl --user restart lama-admin lama-engine
+  && systemctl --user restart lama-engine lama-mgmt lama-status
+```
+
+## Remote access — one authenticated door
+
+The manager listens on `127.0.0.1:9934` and stays there. For another machine, put
+nginx in front (open source, one command, survives reboot):
+
+```bash
+sudo ./scripts/install-nginx-proxy.sh                 # 0.0.0.0:8081
+sudo ./scripts/install-nginx-proxy.sh --show-key      # the bearer token
+```
+
+| path | auth | result |
+|---|---|---|
+| `/healthz` | none | 200 |
+| `/v1/*` | `authorization: Bearer <key>` | proxied to the manager |
+| everything else | — | 404 |
+
+The engine port `9931` and the admin `9933` are never proxied. Config template:
+`deploy/nginx/lama.conf`. Measured this round: 401 without the key, 200 with it,
+and a real POST from a separate network stack (`10.200.0.2 -> 10.200.0.1:8081`)
+returned a chat completion. Details: [docs/api-tcp-uds.md](docs/api-tcp-uds.md) §6.
+
+## Use it from OpenCode (the editor)
+
+`opencode.json` registers lama as a provider (`lama/llama-3-2-1b`) and
+`.opencode/agents/lama-chat.md` defines a lean primary agent for it. One command
+proves the whole path (editor -> manager :9934 -> engine :9931):
+
+```bash
+./scripts/verify-opencode-session.sh
+# opencode session PASS: lama/llama-3-2-1b (lama-chat) answered "lama is alive"
+```
+
+Measured on this machine: 10-13 s per turn, 235 prompt tokens, answer
+`lama is alive`. The session record (`opencode session export`) holds the same
+text, so this is a real session, not a dry run.
+
+### Why a small model needs a lean agent
+
+A 1B model cannot absorb an agent framework's prompt. Measured sizes for the
+same one-line question:
+
+| agent | prompt tokens | result |
+|---|---:|---|
+| `zombiecoder` (full doctrine) | ~16,482 | exceeds a 4096 context, retries forever |
+| `build` | ~2,053 | answers, but ~40 s per turn |
+| `lama-chat` (this repo) | **235** | answers in ~10 s |
+
+Three things make `lama-chat` lean, and all three are required:
+
+1. **Agent file** `.opencode/agents/lama-chat.md`: tiny system prompt,
+   `mode: primary`, `model: lama/llama-3-2-1b`, permissions deny everything.
+   Do not name the agent `lama` — that collides with the provider id and the CLI
+   silently falls back to the default agent.
+2. **Plugin lean list.** The ZombieCoder plugin appends its context pack and
+   persona to every request. `~/.opencode/zombiecoder/config.json` accepts
+   `"leanProviders": ["lama"]` so local providers are skipped (audit shows
+   `persona: "skipped-lean"`; patch in `deploy/opencode/lean-providers.patch`). Without it the doctrine adds ~4k tokens per turn.
+3. **Tool strip in the manager.** A 1B model handed a tool schema answers with a
+   hallucinated call and an empty message — measured:
+   `content: "" tool_calls: [skill {"id":"hi"}]`. Set
+   `LAMA_STRIP_TOOLS=llama-3-2-1b` in `.env`; the manager then removes
+   `tools`/`tool_choice` and logs `{"action":"tools_stripped"}`. Same prompt with
+   the strip: `content: "How are you doing today?"`.
+
+### Context and timeouts
+
+- Load with 32768 so a heavier agent still fits:
+  `node src/main.ts model add <file.gguf> --id llama-3-2-1b --ctx 32768` then
+  `node src/main.ts engine load llama-3-2-1b`.
+- CPU throughput is ~30-60 prompt tokens/s; the provider block sets
+  `headerTimeout`/`chunkTimeout` to 20 minutes so a slow first token is not
+  mistaken for a dead server.
+- Use `--standalone` when testing: a background editor service keeps retrying an
+  abandoned request and the single engine slot stays busy. That was the real
+  cause of the earlier "it never answers" loop.
+
+For a remote editor, point `settings.baseURL` at `http://server:8081/v1` and add
+`"headers": {"authorization": "Bearer {file:~/.config/opencode/lama.key}"}`.
+
+## What a remote install guarantees
+
+Any install from git — `scripts/install-from-git.sh` or the one-shot bootstrap — leaves
+the machine in one shape, on Linux (systemd), macOS (launchd) or Windows (printed
+`sc.exe` plan):
+
+1. `lama-engine` owns the llama.cpp process. Nothing else may spawn it: once the unit
+   is enabled, `engine load`/`engine unload` go through the supervisor even if
+   `LAMA_SERVICE_MODE=none` is set or the `.env` was hand-edited.
+2. `lama-mgmt` (9934) and `lama-status` (9935) are the resident doors. Neither imports
+   the admin app.
+3. `lama-admin` is never enabled by an install. An existing enabled unit from an older
+   install is stopped and disabled during the upgrade.
+4. `write_file` and `run_shell` are off unless `LAMA_TOOLS_ALLOW_WRITE=1` /
+   `LAMA_TOOLS_ALLOW_SHELL=1`; an admin token is management access, not host access.
+5. The installer prints what it asserted and exits non-zero if the admin is active
+   without `--with-admin`.
+
+Check it after any install:
+
+```bash
+for u in engine mgmt status admin; do
+  printf '%-7s %s/%s\n' "$u" "$(systemctl --user is-enabled lama-$u 2>/dev/null || true)" \
+    "$(systemctl --user is-active lama-$u 2>/dev/null || true)"
+done
+# engine enabled/active, mgmt enabled/active, status enabled/active, admin disabled/inactive
 ```
 
 ## One-shot installer

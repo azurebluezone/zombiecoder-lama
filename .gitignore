@@ -20,6 +20,10 @@ gateway/
 dist/
 lama-dist-*.tgz
 
+# python bytecode
+__pycache__/
+*.pyc
+
 # editor / OS noise
 node_modules/
 .DS_Store

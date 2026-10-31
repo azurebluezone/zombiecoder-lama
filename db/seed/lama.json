@@ -65,9 +65,8 @@
         "src/mcp/server.ts"
       ],
       "env": {
-        "LAMA_WORKSPACE": "/home/sahon/lama/workspace"
+        "LAMA_WORKSPACE": "workspace"
       },
-      "cwd": "/home/sahon/lama",
       "timeout_ms": 30000,
       "enabled": 1,
       "metadata": {

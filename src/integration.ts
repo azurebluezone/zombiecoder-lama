@@ -757,12 +757,14 @@ npm install`,
         code: `npm run install:llama`,
       },
       {
-        title: "5. Create the token, database and services",
-        body: "The last line prints your admin token. Copy it somewhere safe; it is the only password.",
+        title: "5. Create the token, database and the three resident units",
+        body: "Three units run the system: engine (owns llama.cpp), manager (the /v1 door) and status (read-only polling). The admin is not one of them — it stays an on-demand client, so this step also proves it is disabled. Copy the token anyway; you will need it if you ever start the admin.",
         code: `npm run setup
-node src/main.ts service install user
-node src/main.ts service install user --admin
-grep '^LAMA_ADMIN_TOKEN=' .env`,
+node src/main.ts service install user --kind engine --start
+node src/main.ts service install user --kind manager --start
+node src/main.ts service install user --kind status --start
+grep '^LAMA_ADMIN_TOKEN=' .env
+systemctl --user is-enabled lama-admin   # must print: disabled`,
       },
       {
         title: "6. Download a small test model",
@@ -773,15 +775,17 @@ curl -L --fail -o "models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf" \\
   "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"`,
       },
       {
-        title: "7. Register it, load it, check it",
-        body: `Open ${adminUrl} in a browser and paste the token from .env. Model List → Register model → pick the file under DISCOVERED GGUF → fill MODEL ID (API ALIAS) with a short name such as qwen2.5-0.5b → Register, then press Load on the card. Wait until the card says running, then these two commands must answer 200 and list your alias:`,
+        title: "7. Register it, load it, check it — no admin needed",
+        body: `The CLI registers the file and asks lama-engine.service to restart with it. The manager then answers on 9934 and the status file on 9935; the admin app is never involved. The same three calls work from another machine through the authenticated nginx door (docs/api-tcp-uds.md section 6).`,
         code: `cd "$HOME/lama"
-curl -s http://127.0.0.1:9933/healthz
-curl -s http://127.0.0.1:9931/v1/models`,
+node src/main.ts model add models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf --id qwen2.5-0.5b --ctx 4096
+node src/main.ts engine load qwen2.5-0.5b
+curl -s http://127.0.0.1:9934/healthz
+curl -s http://127.0.0.1:9935/status.json | head -c 200`,
       },
     ],
     finish:
-      "That is the whole install. The admin keeps running after logout only if you run: loginctl enable-linger \"$USER\". To update later: cd ~/lama && git pull && npm install && npm run check && systemctl --user restart lama-admin lama-engine.",
+      "That is the whole install. The three units keep running after logout only if you run: loginctl enable-linger \"$USER\". To update later: cd ~/lama && git pull && npm install && npm run check && systemctl --user restart lama-engine lama-mgmt lama-status. The admin is optional: npm start, then stop it when you are done.",
   };
 }
 

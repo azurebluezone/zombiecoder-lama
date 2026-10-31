@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "lama": {
+      "name": "lama (local llama.cpp)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:9934/v1",
+        "headerTimeout": 1200000,
+        "chunkTimeout": 1200000,
+        "timeout": 1800000
+      },
+      "models": {
+        "llama-3-2-1b": {
+          "name": "Llama 3.2 1B Instruct (local)",
+          "limit": {
+            "context": 32768,
+            "output": 256
+          },
+          "capabilities": {
+            "tools": false,
+            "temperature": true
+          }
+        }
+      }
+    }
+  }
+}

@@ -7,7 +7,7 @@ import type { Config } from "./config.ts";
 import type { EngineState, MmapStatus, ModelRow, OsInfo, ToolCall } from "./types.ts";
 import type { Store } from "./db.ts";
 import { request, requestUds } from "./transport.ts";
-import { serviceAction, servicePid } from "./service.ts";
+import { serviceAction, serviceEnabled, servicePid } from "./service.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -510,6 +510,20 @@ export class EngineManager {
     }
   }
 
+  /** True when pid is the engine-run supervisor systemd started for us. */
+  private isSupervisor(pid: number): boolean {
+    if (pid === servicePid(this.os, "user") || pid === servicePid(this.os, "system")) return true;
+    return /engine-run/.test(this.processCommand(pid));
+  }
+
+  private processCommand(pid: number): string {
+    try {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim();
+    } catch {
+      return "";
+    }
+  }
+
   private lock(): void {
     fs.mkdirSync(this.cfg.dataDir, { recursive: true, mode: 0o700 });
     const payload = JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
@@ -524,7 +538,18 @@ export class EngineManager {
     try {
       const current = JSON.parse(fs.readFileSync(this.cfg.lockFile, "utf8")) as { pid?: number };
       if (current.pid && current.pid !== process.pid && isAlive(current.pid)) {
-        throw new Error(`engine is already managed by pid ${current.pid}`);
+        // A live pid is not enough. When a supervisor unit owns the engine, only
+        // that supervisor (or the pid systemd reports for it) may hold the lock;
+        // any other live claimant is a leftover admin/CLI process from a crash
+        // and must not block a load forever.
+        const supervised = this.serviceMode() !== "none";
+        const owner = !supervised || this.isSupervisor(current.pid);
+        if (owner) throw new Error(`engine is already managed by pid ${current.pid}`);
+        this.store.audit(
+          "engine.lock.steal",
+          "",
+          `stale lock pid=${current.pid} cmd=${this.processCommand(current.pid)}`,
+        );
       }
     } catch (error) {
       if ((error as Error).message.startsWith("engine is already")) throw error;
@@ -545,21 +570,28 @@ export class EngineManager {
   }
 
   private serviceMode(): "none" | "user" | "system" {
-    // An explicit LAMA_SERVICE_MODE always wins (CLI/env is the operator's voice).
+    const userEnabled = serviceEnabled(this.os, "user");
+    const systemEnabled = serviceEnabled(this.os, "system");
+    const userPid = servicePid(this.os, "user");
+    const systemPid = servicePid(this.os, "system");
+    const supervisor: "user" | "system" | null =
+      userEnabled || userPid ? "user" : systemEnabled || systemPid ? "system" : null;
+
+    // Once a supervisor unit exists, it owns the engine. This is the rule that
+    // stops the admin app from seizing the process: an admin token is management
+    // access, not engine ownership, so a stale LAMA_SERVICE_MODE=none (or a
+    // hand-edited .env) cannot make this process spawn a private engine.
+    if (supervisor) {
+      const wanted = this.cfg.serviceMode !== "none" ? this.cfg.serviceMode : this.store.setting("service_mode");
+      if (wanted === "system" && supervisor === "system") return "system";
+      return supervisor;
+    }
+
+    // An explicit LAMA_SERVICE_MODE always wins when no unit is installed.
     if (this.cfg.serviceMode !== "none") return this.cfg.serviceMode;
     const fromDb = this.store.setting("service_mode");
     if (fromDb === "user" || fromDb === "system") return fromDb;
-    if (fromDb === "none") {
-      // A stale "none" must not create a second spawner while a systemd unit is
-      // already running the engine: defer to the live unit (config drift guard).
-      if (servicePid(this.os, "user") || servicePid(this.os, "system")) {
-        return servicePid(this.os, "user") ? "user" : "system";
-      }
-      return "none";
-    }
-    if (servicePid(this.os, "user")) return "user";
-    if (servicePid(this.os, "system")) return "system";
-    return this.cfg.serviceMode;
+    return "none";
   }
 
   async status(): Promise<EngineState> {
@@ -1070,7 +1102,7 @@ export class EngineManager {
         await sleep(3000);
         continue;
       }
-      const { command, args } = buildEngineArgs(this.cfg, model);
+      const { command, args, logFile } = buildEngineArgs(this.cfg, model);
       // A killed engine leaves its socket file behind; llama.cpp refuses to bind over it.
       // Never unlink a socket that still answers: /health can time out while a busy
       // engine evaluates a long prompt, and deleting its listener breaks UDS for
@@ -1097,7 +1129,14 @@ export class EngineManager {
         }
       }
       this.store.audit("engine.foreground", model.id, `${command} ${args.join(" ")}`);
-      let child = spawn(command, args, { stdio: "inherit", env: process.env });
+      // Keep the engine's own output in logs/ even when systemd runs this
+      // supervisor. `stdio: "inherit"` only reaches the journal, and a host
+      // without a persistent journal (this one) then has no proof of a load or
+      // a slow request. Same file and mode as the direct-spawn path.
+      fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+      const out = fs.openSync(logFile, "a", 0o600);
+      let child = spawn(command, args, { stdio: ["ignore", out, out], env: process.env });
+      fs.closeSync(out);
       current = child;
       if (child.pid) {
         this.store.setEngineState({
